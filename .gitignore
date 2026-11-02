@@ -8,4 +8,3 @@ dashboard-config*.json
 .env
 .env.*
 .pytest_cache/
-

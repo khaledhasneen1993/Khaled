@@ -42,4 +42,3 @@ class DynamicPublicData(PublicData):
     async def fetch_tickers(self):
         return self.tickers
 
-

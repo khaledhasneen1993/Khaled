@@ -289,4 +289,3 @@ class ContinuousScanner:
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
-
