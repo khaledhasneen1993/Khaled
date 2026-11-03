@@ -1,4 +1,4 @@
-"""Run approved V2 paper trading and send snapshots to its private dashboard."""
+"""Run Final-Edge v3 paper trading and send snapshots to its private dashboard."""
 import argparse
 import asyncio
 import copy
@@ -163,7 +163,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="dashboard-config.json")
     parser.add_argument("--legacy-dashboard", action="store_true", help="Also publish to the old private Sites dashboard")
-    parser.add_argument("--resume", metavar="STATE_FILE", help="Resume a prior V2 session instead of creating one")
+    parser.add_argument("--resume", metavar="STATE_FILE", help="Resume a compatible Final-Edge v3 session instead of creating one")
     args = parser.parse_args()
     config = None
     if args.legacy_dashboard:
@@ -190,7 +190,7 @@ def main():
         parser.error("Set CASCADE_DASHBOARD_TOKEN, or use --legacy-dashboard with a valid config")
     if cloud_publisher:
         log.info("COMBINED DASHBOARD TELEMETRY ENABLED | session=%s", session_id)
-    log.info("LIVE V2 PAPER | state=%s | margin=10%% of wallet | leverage=50x | Final-Edge v3 | hard stop=8%% | trail arm=1.5%% | max=4", state_path)
+    log.info("LIVE PAPER | state=%s | margin=10%% of wallet | leverage=50x | Final-Edge v3 | hard stop=8%% | trail arm=1.5%% | max=4", state_path)
     log.warning("Paper model excludes liquidation, funding and slippage")
     try:
         asyncio.run(run(bot, publisher, cloud_publisher))

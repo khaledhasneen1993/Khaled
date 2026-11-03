@@ -39,13 +39,13 @@ class V2PaperHunter(DynamicPaperHunter):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--state", default="paper_state_dynamic_v2.json")
-    parser.add_argument("--reset", action="store_true", help="Start a fresh virtual $100 V2 account")
+    parser.add_argument("--reset", action="store_true", help="Start a fresh virtual $100 Final-Edge v3 account")
     parser.add_argument("--fee-rate", type=float, default=0.0005)
     args = parser.parse_args()
     if not math.isfinite(args.fee_rate) or not 0 <= args.fee_rate < 0.01:
         parser.error("--fee-rate must be finite and in [0, 0.01)")
     bot = V2PaperHunter(args.state, args.fee_rate, args.reset)
-    v2.log.info("V2 PAPER | margin=10% of wallet | leverage=50x | Final-Edge v3 | hard stop=8% | trail arm=1.5% | max_positions=4")
+    v2.log.info("PAPER | margin=10% of wallet | leverage=50x | Final-Edge v3 | hard stop=8% | trail arm=1.5% | max_positions=4")
     v2.log.warning("V2 paper account does not model liquidation, funding or slippage")
     try:
         asyncio.run(bot.start())

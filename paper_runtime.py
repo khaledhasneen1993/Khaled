@@ -1,4 +1,4 @@
-"""Continuous paper runtime for the approved V2 strategy."""
+"""Continuous paper runtime for the Final-Edge v3 strategy."""
 
 import asyncio
 from pathlib import Path

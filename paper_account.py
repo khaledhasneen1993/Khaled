@@ -1,4 +1,4 @@
-"""Virtual account and persistent state for the approved V2 simulation."""
+"""Virtual account and persistent state for the Final-Edge v3 simulation."""
 
 import asyncio
 import json

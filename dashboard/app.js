@@ -9,7 +9,7 @@ const val=(x,d=4)=>`<span class="num">${num(x,d)}</span>`;
 const pnl=x=>x==null?'—':`<span class="num ${x>=0?'positive':'negative'}">${num(x)}</span>`;
 const dt=x=>x?new Date(typeof x==='number'?x*1000:x).toLocaleString('ar-JO',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',second:'2-digit'}):'—';
 const side=x=>x==='buy'?'شراء LONG':x==='sell'?'بيع SHORT':'—';
-const reason=x=>({CASCADE_MOVE_VOLUME_ORDERBOOK:'الحركة والحجم ودفتر الأوامر',SCALE_IN:'تعزيز',TP:'جني ربح',SL:'وقف خسارة',TRAIL_SL:'وقف ربح متحرك',TRAILING_SL:'وقف الربح المتدرج',PARTIAL_SL:'إغلاق نصف الصفقة',FAST_ADVERSE:'خروج مبكر عند انعكاس سريع',POST_PARTIAL:'وقف بعد الإغلاق الجزئي',BE_AFTER_PARTIAL:'وقف التعادل بعد الإغلاق الجزئي'}[x]||x||'غير محفوظ');
+const reason=x=>({CASCADE_MOVE_VOLUME_ORDERBOOK:'الحركة والحجم ودفتر الأوامر',SCALE_IN:'تعزيز',TP:'جني ربح',SL:'وقف خسارة',TRAIL_SL:'وقف ربح متحرك',TRAILING_SL:'وقف الربح المتدرج'}[x]||x||'غير محفوظ');
 const ids=()=>selected==='all'?['final','khaled']:[selected];
 const data=id=>latest?.bots?.[id]||{};
 const detail=(x,id)=>`<details data-detail="${esc(id)}"><summary>تفاصيل التنفيذ والإشارة</summary><pre class="detail-data">${esc(JSON.stringify(x,null,2))}</pre></details>`;
