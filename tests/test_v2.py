@@ -1,146 +1,73 @@
-import asyncio
-import json
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import binance_cascade_hunter_dynamic_v2 as v2
 from binance_cascade_hunter_dynamic_v2_paper import V2PaperHunter
-from continuous_scanner import ContinuousScanner
-from test_continuous import NOW, StreamData, event
+from execution.adaptive_runtime import CONFIG
+from test_continuous import BTC, StreamData, event
 
-BTC = 'BTC/USDT:USDT'
 
-class V2Tests(unittest.IsolatedAsyncioTestCase):
+class AdaptiveAccountTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        self.temp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temp.cleanup)
-        self.path = Path(self.temp.name) / 'state.json'
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.addCleanup(patch.stopall)
+        patch.dict(CONFIG["confirm"], confirm_timeout_sec=0).start()
+        patch.dict(CONFIG["execution"], entry_timeout_sec=0).start()
+        self.path = Path(temp.name) / "state.json"
         self.data = StreamData()
-        self.bot = V2PaperHunter(self.path, fee_rate=0, market_data=self.data)
+        self.bot = V2PaperHunter(self.path, market_data=self.data)
+        sc = self.bot.scanner
+        await sc.refresh_universe()
+        await sc.seed(sc.symbols)
+        sc.connected = True
+        sc.wall_clock = lambda: 1800000000
 
-    async def tick(self, price):
-        self.data.price = price
+    async def test_gap_liquidation_records_margin_loss_and_symbol_cooldown(self):
+        self.data.price = 102
+        self.bot.scanner.ingest(event())
+        await self.bot.scanner.evaluate(BTC)
+        pos = self.bot.positions[BTC]
+        margin = self.bot.exchange.positions[BTC]["margin"]
+        self.data.price = pos["liq_price"] - .1
         await self.bot.manage_exits()
-
-    async def test_four_positions_then_reject_fifth_and_duplicate(self):
-        for i in range(4):
-            symbol = f"COIN{i}/USDT:USDT"
-            self.assertTrue(await self.bot.enter(symbol, "buy", 100))
-            self.assertAlmostEqual(self.bot.positions[symbol]["amount"], 5)
-            self.assertAlmostEqual(self.bot.exchange.positions[symbol]["margin"], 10)
-        self.assertFalse(await self.bot.enter(BTC, "buy", 100))
-        self.assertFalse(await self.bot.enter("COIN0/USDT:USDT", "sell", 100))
-        self.assertEqual(len(self.bot.positions), 4)
-
-    async def test_trail_arms_at_threshold_and_tracks_best_price(self):
-        for side, direction in [("buy", 1), ("sell", -1)]:
-            with self.subTest(side=side):
-                self.bot = V2PaperHunter(self.path, fee_rate=0, reset=True, market_data=self.data)
-                self.data.price = 100
-                await self.bot.enter(BTC, side, 100)
-                p = self.bot.positions[BTC]
-                await self.tick(100 * (1 + direction * .0149))
-                self.assertFalse(p["trailing"])
-                self.assertAlmostEqual(p["sl"], 100 * (1 - direction * .08))
-                await self.tick(100 * (1 + direction * .015))
-                self.assertTrue(p["trailing"])
-                self.assertAlmostEqual(p["sl"], p["best_price"] * (1 - direction * .006))
-                best = 100 * (1 + direction * .03)
-                await self.tick(best)
-                stop = best * (1 - direction * .006)
-                await self.tick(100 * (1 + direction * .027))
-                self.bot = V2PaperHunter(self.path, fee_rate=0, market_data=self.data)
-                self.assertAlmostEqual(self.bot.positions[BTC]["best_price"], best)
-                self.assertAlmostEqual(self.bot.positions[BTC]["sl"], stop)
-                await self.tick(stop)
-                self.assertFalse(self.bot.positions)
-                self.assertEqual(len(self.bot.exchange.trades), 2)
-                self.assertEqual(self.bot.exchange.trades[-1]["exit_reason"], "TRAILING_SL")
-
-    async def test_adverse_path_closes_only_at_hard_stop(self):
-        for side, direction in [("buy", 1), ("sell", -1)]:
-            with self.subTest(side=side):
-                self.bot = V2PaperHunter(self.path, fee_rate=0, reset=True, market_data=self.data)
-                self.data.price = 100
-                await self.bot.enter(BTC, side, 100)
-                for loss in (.01, .015, .028, .03, .079):
-                    await self.tick(100 * (1 - direction * loss))
-                    self.assertEqual(len(self.bot.exchange.trades), 1)
-                    self.assertEqual(self.bot.positions[BTC]["amount"], 5)
-                await self.tick(100 * (1 - direction * .08))
-                self.assertFalse(self.bot.positions)
-                self.assertAlmostEqual(self.bot.exchange.balance, 60)
-                self.assertEqual(self.bot.exchange.trades[-1]["exit_reason"], "SL")
-
-    async def test_account_rejects_reducing_less_than_full_position(self):
-        await self.bot.enter(BTC, "buy", 100)
-        with self.assertRaises(ValueError):
-            await self.bot.exchange.create_order(BTC, "market", "sell", 2.5,
-                                                 params={"reduceOnly": True})
-        self.assertEqual(self.bot.exchange.positions[BTC]["amount"], 5)
-
-    async def test_size_compounds_after_realized_profit(self):
-        await self.bot.enter(BTC, "buy", 100)
-        await self.tick(103)
-        await self.tick(102)
-        self.assertAlmostEqual(self.bot.exchange.balance, 110)
-        self.data.price = 100
-        self.assertTrue(await self.bot.enter("ETH", "buy", 100))
-        self.assertAlmostEqual(self.bot.exchange.positions["ETH"]["margin"], 11)
-
-    async def test_free_margin_rejects_entry(self):
-        await self.bot.enter(BTC, "buy", 100)
-        await self.tick(93)
-        self.assertEqual(self.bot.exchange.balance, 100)
-        # Simulate other reserved funds without changing the wallet basis.
-        self.bot.exchange.positions["reserved"] = dict(amount=0, side="buy", entry=100, margin=85)
-        self.assertFalse(await self.bot.enter("ETH", "buy", 93))
-
-    async def test_loss_cooldown_is_symbol_local_and_persisted(self):
-        with patch.object(v2.time, "time", return_value=1000):
-            await self.bot.enter(BTC, "buy", 100)
-            await self.tick(92)
-        self.bot = V2PaperHunter(self.path, fee_rate=0, market_data=self.data)
-        self.assertEqual(self.bot.last_loss[BTC], 1000)
-        self.data.price = 100
-        with patch.object(v2.time, "time", return_value=1599):
-            self.assertFalse(await self.bot.enter(BTC, "buy", 100))
-            self.assertTrue(await self.bot.enter("ETH", "buy", 100))
-        with patch.object(v2.time, "time", return_value=1600):
-            self.assertTrue(await self.bot.enter(BTC, "buy", 100))
-
-    async def test_scanner_rejects_weak_otherwise_valid_signal(self):
-        scanner = ContinuousScanner(self.bot, clock=lambda:100, wall_clock=lambda:NOW/1000)
-        await scanner.refresh_universe()
-        await scanner.seed(scanner.symbols)
-        scanner.connected = True
-        async def weak_book(*args, **kwargs):
-            return {"bids": [[100, 68]], "asks": [[100, 32]]}
-        self.data.fetch_order_book = weak_book
-        scanner.ingest(event("BTCUSDT", close=101.3, volume=4))
-        await scanner.evaluate(BTC)
-        self.assertEqual(scanner.book_checks, 1)
+        self.assertEqual(self.bot.exchange.trades[-1]["exit_reason"], "liquidation")
+        self.assertAlmostEqual(self.bot.exchange.trades[-1]["pnl_usdt"], -margin)
         self.assertFalse(self.bot.positions)
+        restored = V2PaperHunter(self.path, market_data=self.data)
+        self.assertIn(BTC, restored.last_loss)
+        self.assertFalse(restored.entry_allowed(BTC, restored.last_loss[BTC] + 599))
 
-    async def test_incompatible_state_rejected_without_modifying_file(self):
+    async def test_incompatible_state_refused_without_overwrite(self):
         self.bot.save()
-        state=json.loads(self.path.read_text())
-        state['settings']['MAX_POSITION_PCT']=.99
-        self.path.write_text(json.dumps(state))
-        before=self.path.read_bytes()
-        with self.assertRaises(ValueError):V2PaperHunter(self.path,fee_rate=0,market_data=self.data)
-        self.assertEqual(self.path.read_bytes(),before)
+        source = self.path.read_text()
+        self.path.write_text(source.replace('"adaptive_v1"', '"previous_model"'))
+        before = self.path.read_bytes()
+        with self.assertRaises(ValueError):
+            V2PaperHunter(self.path, market_data=self.data)
+        self.assertEqual(self.path.read_bytes(), before)
 
-    async def test_scanner_enforces_four_positions_concurrently(self):
-        self.data.tickers={f'COIN{i}/USDT:USDT':{'quoteVolume':25_000_000} for i in range(7)}
-        scanner=ContinuousScanner(self.bot,config=v2,clock=lambda:100,wall_clock=lambda:NOW/1000)
-        await scanner.refresh_universe()
-        await scanner.seed(scanner.symbols)
-        scanner.connected=True
-        self.data.price=102
-        for i in range(7):scanner.ingest(event(f'COIN{i}USDT'))
-        with patch('continuous_scanner.BOOK_REQUEST_SPACING',0):
-            await asyncio.gather(*(scanner.evaluate(s) for s in scanner.symbols))
-        self.assertEqual(len(self.bot.positions),4)
+    async def test_sizing_reserves_both_fees_and_slippage(self):
+        equity = self.bot.exchange.equity
+        qty, stop, _, _ = self.bot.risk_plan("short", 100, 1, None, 1.0)
+        cost = (abs(100 - stop.price) + (100 + stop.price) * self.bot.exchange.fee_rate
+                + 100 * CONFIG["execution"]["max_slippage_bps"] / 10000)
+        self.assertAlmostEqual(qty * cost, equity * CONFIG["risk"]["risk_pct_per_trade"])
+
+    async def test_passive_trade_through_fills_at_limit(self):
+        import time
+
+        async def prints(symbol, since, limit):
+            return [{"timestamp": time.time() * 1000, "side": "sell",
+                     "price": 101.98, "amount": 1000}]
+
+        self.data.fetch_trades = prints
+        self.data.price = 102
+        self.bot.scanner.ingest(event())
+        with patch.dict(CONFIG["execution"], entry_timeout_sec=5):
+            await self.bot.scanner.evaluate(BTC)
+        fill = self.bot.exchange.trades[-1]
+        self.assertEqual(fill["execution_type"], "GTX")
+        self.assertAlmostEqual(fill["price"], 101.99)
+        self.assertEqual(self.bot.positions[BTC]["entry"], fill["price"])

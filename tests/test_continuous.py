@@ -9,6 +9,7 @@ import aiohttp
 from binance_cascade_hunter_dynamic_v2_paper import V2PaperHunter as DynamicPaperHunter
 from continuous_scanner import CandleGap, ContinuousScanner
 from fixtures import DynamicPublicData
+from execution.adaptive_runtime import CONFIG
 
 NOW = 1_800_000_000_000
 BTC = "BTC/USDT:USDT"
@@ -18,7 +19,7 @@ SOL = "SOL/USDT:USDT"
 
 class StreamData(DynamicPublicData):
     async def fetch_ohlcv(self, symbol, timeframe, limit):
-        return [[NOW - (29 - i) * 60000, 100, 100, 100, 100, 1] for i in range(30)]
+        return [[NOW - (29 - i) * 60000, 100, 100.15, 99.85, 100, 1] for i in range(30)]
 
 
 def event(symbol="BTCUSDT", close=102, volume=10, stamp=NOW, offset=1):
@@ -30,6 +31,9 @@ def event(symbol="BTCUSDT", close=102, volume=10, stamp=NOW, offset=1):
 
 class ContinuousTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
+        self.addCleanup(patch.stopall)
+        patch.dict(CONFIG["confirm"], confirm_timeout_sec=0).start()
+        patch.dict(CONFIG["execution"], entry_timeout_sec=0).start()
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.path = Path(self.temp.name) / "state.json"
@@ -38,6 +42,7 @@ class ContinuousTests(unittest.IsolatedAsyncioTestCase):
         self.mono = 100.0
         self.wall = NOW / 1000
         self.scanner = ContinuousScanner(self.bot, clock=lambda: self.mono, wall_clock=lambda: self.wall)
+        self.bot.scanner = self.scanner
         await self.scanner.refresh_universe()
         await self.scanner.seed(self.scanner.symbols)
         self.scanner.connected = True
@@ -47,21 +52,21 @@ class ContinuousTests(unittest.IsolatedAsyncioTestCase):
         release = asyncio.Event()
         entered = asyncio.Event()
         original_book = self.data.fetch_order_book
-        original_enter = self.bot.enter
+        original_enter = self.bot.enter_signal
 
         async def order_book(symbol, limit):
             if symbol == ETH:
                 await release.wait()
             return await original_book(symbol, limit)
 
-        async def enter(symbol, side, price):
-            result = await original_enter(symbol, side, price)
+        async def enter(symbol, signal):
+            result = await original_enter(symbol, signal)
             if symbol == BTC and result:
                 entered.set()
             return result
 
         self.data.fetch_order_book = order_book
-        self.bot.enter = enter
+        self.bot.enter_signal = enter
         self.scanner.ingest(event("ETHUSDT"))
         self.scanner.ingest(event("BTCUSDT"))
         with patch("continuous_scanner.BOOK_REQUEST_SPACING", 0):
@@ -143,10 +148,7 @@ class ContinuousTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.scanner.symbols, (ETH,))
         self.assertIn(BTC, self.bot.positions)
         self.assertIsNone(self.scanner.signal(BTC))
-        self.data.price = 105
-        await self.bot.manage_exits()
-        self.assertIn(BTC, self.bot.positions)
-        self.data.price = 104.37
+        self.data.price = self.bot.positions[BTC]["tp"]
         await self.bot.manage_exits()
         self.assertNotIn(BTC, self.bot.positions)
 

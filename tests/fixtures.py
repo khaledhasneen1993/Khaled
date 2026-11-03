@@ -15,7 +15,7 @@ class PublicData:
         return {"last": self.price}
 
     async def fetch_order_book(self, symbol, limit):
-        return {"bids": [[100, 9]], "asks": [[100, 1]]}
+        return {"bids": [[self.price - .01, 900]], "asks": [[self.price + .01, 100]]}
 
     async def fetch_ohlcv(self, symbol, timeframe, limit):
         rows = [[i, 100, 100, 100, 100, 1] for i in range(limit)]
@@ -27,7 +27,7 @@ class PublicData:
 
     def market(self, symbol):
         return {"linear": True, "swap": True, "settle": "USDT",
-                "limits": {"amount": {"min": 0.001}, "cost": {"min": 5}}}
+                "precision": {"price": .01}, "limits": {"amount": {"min": 0.001}, "cost": {"min": 5}}}
 
     async def close(self):
         self.closed = True
@@ -41,4 +41,5 @@ class DynamicPublicData(PublicData):
 
     async def fetch_tickers(self):
         return self.tickers
+
 

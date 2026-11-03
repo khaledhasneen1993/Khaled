@@ -45,6 +45,7 @@ class Publisher:
             "account_positions": bot.exchange.positions,
             "strategy_positions": bot.positions, "prices": bot.exchange.prices,
             "trades": bot.exchange.trades,
+            "execution_events": bot.execution_events,
             "scanner": {"connected": bot.scanner.connected,
                         "symbols": len(bot.scanner.symbols), "events": bot.scanner.events,
                         "entries": bot.scanner.entries},
@@ -108,6 +109,7 @@ class CloudPublisher:
             "account_positions": bot.exchange.positions,
             "strategy_positions": bot.positions, "prices": bot.exchange.prices,
             "trades": bot.exchange.trades,
+            "execution_events": bot.execution_events,
             "scanner": {"connected": bot.scanner.connected,
                         "symbols": len(bot.scanner.symbols), "events": bot.scanner.events,
                         "entries": bot.scanner.entries},
@@ -190,8 +192,8 @@ def main():
         parser.error("Set CASCADE_DASHBOARD_TOKEN, or use --legacy-dashboard with a valid config")
     if cloud_publisher:
         log.info("COMBINED DASHBOARD TELEMETRY ENABLED | session=%s", session_id)
-    log.info("LIVE PAPER | state=%s | margin=10%% of wallet | leverage=50x | Final-Edge v3 | hard stop=8%% | trail arm=1.5%% | max=4", state_path)
-    log.warning("Paper model excludes liquidation, funding and slippage")
+    log.info("LIVE PAPER | state=%s | adaptive paper execution", state_path)
+    log.warning("Paper liquidation and fills are estimates; funding is not modeled")
     try:
         asyncio.run(run(bot, publisher, cloud_publisher))
     except KeyboardInterrupt:

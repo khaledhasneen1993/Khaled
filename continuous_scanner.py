@@ -188,24 +188,25 @@ class ContinuousScanner:
             self.book_pause_until = self.clock() + 5
             self.config.log.warning("Order book check failed %s (backoff 5s): %s", symbol, error)
             return
-        async with self.bot.lock:
-            signal = self.signal(symbol)
-            if (signal is None or symbol in self.bot.positions
-                    or len(self.bot.positions) >= self.config.MAX_CONCURRENT_POSITIONS):
-                return
-            if not ((signal["side"] == "buy" and imbalance > self.config.ORDERBOOK_IMBALANCE)
-                    or (signal["side"] == "sell" and imbalance < -self.config.ORDERBOOK_IMBALANCE)):
-                return
-            strength = abs(signal["ret"]) * signal["spike"] * abs(imbalance)
-            if strength < self.config.MIN_SIGNAL_STRENGTH:
-                return
-            # First eligible completed check gets the slot; do not wait for all symbols.
-            if await self.bot.enter(symbol, signal["side"], signal["price"]):
-                if hasattr(self.bot, "record_entry_signal"):
-                    self.bot.record_entry_signal(symbol, {**signal, "imbalance": imbalance, "strength": strength})
-                self.entries += 1
-                self.config.log.info("CONTINUOUS ENTRY %s | move=%.3f%% volume=%.2fx imbalance=%.3f",
-                                symbol, signal["ret"] * 100, signal["spike"], imbalance)
+        signal = self.signal(symbol)
+        if signal is None:
+            return
+        if not ((signal["side"] == "buy" and imbalance > self.config.ORDERBOOK_IMBALANCE)
+                or (signal["side"] == "sell" and imbalance < -self.config.ORDERBOOK_IMBALANCE)):
+            return
+        strength = abs(signal["ret"]) * signal["spike"] * abs(imbalance)
+        if await self.bot.enter_signal(symbol, {**signal, "imbalance": imbalance, "strength": strength}):
+            self.entries += 1
+            self.config.log.info("CONTINUOUS ENTRY %s | move=%.3f%% volume=%.2fx imbalance=%.3f",
+                                 symbol, signal["ret"] * 100, signal["spike"], imbalance)
+
+    def position_signal_alive(self, symbol, side):
+        if (not self.connected or symbol not in self.received
+                or self.clock() - self.received[symbol] > MAX_EVENT_AGE
+                or abs(self.wall_clock() - self.event_times.get(symbol, 0) / 1000) > MAX_EVENT_AGE):
+            return None
+        signal = self.signal(symbol)
+        return signal is not None and signal["side"] == side
 
     async def worker(self):
         while True:

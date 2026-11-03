@@ -30,5 +30,65 @@
   "margin_fraction_per_position": 0.1,
   "trail_arm_pct": 0.015,
   "trail_distance_pct": 0.006,
-  "notes": "No partials. Compound margin. Trail after +1.5%. Hard stop 8%."
+  "notes": "No partials. Compound margin. Trail after +1.5%. Hard stop 8%.",
+  "risk": {
+    "risk_pct_per_trade": 0.008,
+    "tp_atr_mult": 2.5,
+    "atr_mult": 1.5,
+    "struct_buffer": 0.0005,
+    "liq_safety_margin": 0.015,
+    "min_stop_pct": 0.003,
+    "max_implied_leverage": 25,
+    "max_portfolio_risk_pct": 0.025,
+    "daily_drawdown_stop_pct": 0.04,
+    "consecutive_loss_cooldown": 4,
+    "mmr": 0.004
+  },
+  "exit": {
+    "be_trigger_pct": 0.003,
+    "be_offset_pct": 0.0008,
+    "trail_enabled": true,
+    "trail_atr_mult": 1.2,
+    "time_stop_min": 30,
+    "time_stop_min_profit": 0.002,
+    "adverse_excursion_pct": 0.005,
+    "max_bars_in_trade": 45,
+    "adverse_excursion_window_sec": 180
+  },
+  "execution": {
+    "retrace_atr": 0.35,
+    "min_tick_offset": 0.0,
+    "entry_timeout_sec": 5,
+    "max_chase_pct": 0.0015,
+    "fallback_qty_pct": 0.7,
+    "max_spread": 0.0008,
+    "max_slippage_bps": 5.0,
+    "max_latency_ms": 200
+  },
+  "confirm": {
+    "confirm_timeout_sec": 2.0,
+    "cvd_threshold": 0.0,
+    "unconfirmed_size_mult": 0.6
+  },
+  "quality": {
+    "cs_range": [
+      0.0,
+      0.05
+    ],
+    "vr_range": [
+      1.0,
+      6.0
+    ],
+    "bp_range": [
+      0.0,
+      1.0
+    ]
+  },
+  "adaptive": {
+    "exit_interval_sec": 1,
+    "atr_period": 14,
+    "flow_window_sec": 30,
+    "book_poll_sec": 0.25,
+    "unknown_agreement": 0.5
+  }
 }

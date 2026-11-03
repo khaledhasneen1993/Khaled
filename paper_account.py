@@ -77,7 +77,8 @@ class PaperExchange:
             raise ValueError("Invalid reduce-only close")
         if not closing and position:
             raise ValueError("Position already exists")
-        price = float((await self.fetch_ticker(symbol))["last"])
+        price = await self.resolve_fill_price(symbol, params or {})
+        self.prices[symbol] = price
         notional = amount * price
         fee = notional * self.fee_rate
         pnl = 0.0
@@ -85,6 +86,8 @@ class PaperExchange:
             pnl = (price - position["entry"]) * amount * (
                 1 if position["side"] == "buy" else -1
             )
+            if (params or {}).get("paper_liquidation"):
+                pnl = -position["margin"]
             self.balance += pnl - fee
             del self.positions[symbol]
         else:
@@ -114,6 +117,15 @@ class PaperExchange:
                           trade["id"], side, symbol, self.balance, self.free, self.equity)
         return {**trade, "average": price, "filled": amount, "status": "closed"}
 
+    async def resolve_fill_price(self, symbol, params):
+        price = params.get("paper_fill_price")
+        if price is None:
+            price = (await self.fetch_ticker(symbol))["last"]
+        price = float(price)
+        if not math.isfinite(price) or price <= 0:
+            raise ValueError("Invalid simulated fill price")
+        return price
+
     async def close(self):
         await self.market_data.close()
 
@@ -134,6 +146,7 @@ class PaperState:
         self.positions = state["strategy_positions"]
         self.last_trade = state["last_trade"]
         self.last_loss = state.get("last_loss", {})
+        self.execution_events = state.get("execution_events", [])
         if set(self.positions) != set(self.exchange.positions):
             raise ValueError("Inconsistent saved positions")
 
@@ -147,6 +160,7 @@ class PaperState:
             "strategy_positions": self.positions, "prices": self.exchange.prices,
             "last_trade": self.last_trade, "trades": self.exchange.trades,
             "last_loss": self.last_loss,
+            "execution_events": self.execution_events,
         }
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.state_path.with_suffix(self.state_path.suffix + ".tmp")

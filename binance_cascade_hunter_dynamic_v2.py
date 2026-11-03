@@ -1,11 +1,13 @@
 # language: Python 3.11+, file: binance_cascade_hunter_dynamic_v2.py
-# target: paper USDT-M with Final-Edge v3 exits
+# target: paper USDT-M with adaptive risk and execution
 # deps: pip install ccxt pandas numpy aiohttp
 
 import asyncio
 import time
 import pandas as pd
 import logging
+from execution.adaptive_runtime import AdaptiveExecution, CONFIG
+from execution.market_view import candle_context
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(message)s")
 log = logging.getLogger("CASCADE")
@@ -30,7 +32,7 @@ MIN_SIGNAL_STRENGTH = 0.020
 SAME_SYMBOL_LOSS_COOLDOWN = 600
 
 
-class CascadeHunter:
+class CascadeHunter(AdaptiveExecution):
     """V2 strategy methods; execution is supplied by the virtual account runtime."""
 
     def __init__(self):
@@ -108,84 +110,30 @@ class CascadeHunter:
             return None
 
     async def size_position(self, symbol):
-        price = (await self.exchange.fetch_ticker(symbol))["last"]
-        balance = (await self.exchange.fetch_balance())["USDT"]["total"]
-        notional = max(0.0, balance) * MAX_POSITION_PCT * LEVERAGE
-        amount = notional / price
-        amount = float(self.exchange.amount_to_precision(symbol, amount))
-        return amount
+        signal = await self.detect_cascade(symbol)
+        if signal is None or not (signal["long"] or signal["short"]):
+            return 0.0
+        side = "long" if signal["long"] else "short"
+        rows = await self.exchange.fetch_ohlcv(symbol, "1m", limit=30)
+        atr, swing, _ = candle_context(rows, CONFIG["adaptive"]["atr_period"], side)
+        price = float((await self.exchange.fetch_ticker(symbol))["last"])
+        qty, _, _, _ = self.risk_plan(side, price, atr, swing, 1.0)
+        return float(self.exchange.amount_to_precision(symbol, qty))
 
     async def enter(self, symbol, side, price):
-        now = time.time()
-        if symbol in self.positions or now - self.last_loss.get(symbol, -float("inf")) < SAME_SYMBOL_LOSS_COOLDOWN:
+        signal = await self.detect_cascade(symbol)
+        if signal is None or not signal.get("long" if side == "buy" else "short"):
             return False
-        if symbol in self.last_trade and now - self.last_trade[symbol] < COOLDOWN_SEC:
-            return False
-        if len(self.positions) >= MAX_CONCURRENT_POSITIONS:
-            return False
-
-        amount = await self.size_position(symbol)
-        if amount <= 0:
-            return False
-
-        try:
-            await self.set_leverage(symbol)
-            order = await self.exchange.create_order(
-                symbol, "market", side, amount,
-                params={"reduceOnly": False}
-            )
-            price = float(order["average"])
-            amount = float(order["filled"])
-            self.last_trade[symbol] = now
-            direction = 1 if side == "buy" else -1
-            self.positions[symbol] = {
-                "side": side, "entry": price, "original_entry": price, "amount": amount,
-                "sl": price * (1 - direction * HARD_STOP_PCT), "stop_kind": "SL",
-                "trailing": False, "best_price": price, "entry_time": time.time(),
-                "entry_fee": order["fee_usdt"],
-            }
-            log.info(f"ENTER {side.upper()} {symbol} size={amount:.4f} @ {price:.4f}")
-            return True
-        except Exception as e:
-            log.error(f"Entry failed {symbol}: {e}")
-            return False
+        return await self.enter_signal(symbol, {
+            "side": side, "price": float(price), "ret": float(signal["ret"]),
+            "spike": float(signal["vol_spike"]), "imbalance": float(signal["imb"]),
+        })
 
     async def close_position(self, symbol, p, price):
-        side = "sell" if p["side"] == "buy" else "buy"
-        fill = await self.exchange.create_order(
-            symbol, "market", side, p["amount"], params={"reduceOnly": True}
-        )
-        self.record_exit_reason(symbol, p["stop_kind"], price)
-        del self.positions[symbol]
-        net = fill["pnl_usdt"] - fill["fee_usdt"] - p["entry_fee"]
-        if net < 0:
-            self.last_loss[symbol] = time.time()
-        log.info("EXIT %s %s @ %.8g | net=%.6f", p["stop_kind"], symbol, price, net)
+        await self.finalize_position(symbol, p, price, time.time(), p["stop_kind"])
 
     async def manage_exits(self):
-        for symbol, p in list(self.positions.items()):
-            try:
-                price = float((await self.exchange.fetch_ticker(symbol))["last"])
-                direction = 1 if p["side"] == "buy" else -1
-                if direction * (price - p["sl"]) <= p["entry"] * 1e-12:
-                    await self.close_position(symbol, p, price)
-                    continue
-
-                move = direction * (price / p["entry"] - 1)
-                if not p["trailing"]:
-                    if move + 1e-12 < TRAIL_ARM_PCT:
-                        continue
-                    p["trailing"] = True
-                    p["best_price"] = price
-                elif direction * (price - p["best_price"]) > 0:
-                    p["best_price"] = price
-
-                candidate = p["best_price"] * (1 - direction * TRAIL_DISTANCE_PCT)
-                if direction * (candidate - p["sl"]) > 0:
-                    p["sl"] = candidate
-                    p["stop_kind"] = "TRAILING_SL"
-            except Exception as error:
-                log.error("Exit check failed %s: %s", symbol, error)
+        await self.adaptive_exits()
 
     async def exit_watcher(self):
         """مراقبة الخروج بشكل مستمر بين المسحات"""
@@ -193,7 +141,7 @@ class CascadeHunter:
             try:
                 async with self.lock:
                     await self.manage_exits()
-                await asyncio.sleep(8)
+                await asyncio.sleep(self.exit_interval_sec)
             except Exception as e:
                 log.error(f"Exit watcher error: {e}")
                 await asyncio.sleep(15)

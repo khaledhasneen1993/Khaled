@@ -9,13 +9,13 @@ from paper_runtime import DynamicPaperHunter
 
 
 class V2PaperHunter(DynamicPaperHunter):
-    def __init__(self, state_path="paper_state_dynamic_v2.json", fee_rate=0.0005,
+    def __init__(self, state_path="paper_state_adaptive.json", fee_rate=0.0005,
                  reset=False, market_data=None):
         super().__init__(state_path, fee_rate, reset, market_data, strategy_config=v2)
 
     def settings(self):
         return {**super().settings(), "mode": "dynamic_v2_continuous",
-                "position_basis": "wallet_total", "stop_basis": "entry_fill_price"}
+                "position_basis": "equity_stop_risk", "stop_basis": "entry_fill_price"}
 
     async def size_position(self, symbol):
         return await v2.CascadeHunter.size_position(self, symbol)
@@ -38,15 +38,15 @@ class V2PaperHunter(DynamicPaperHunter):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--state", default="paper_state_dynamic_v2.json")
+    parser.add_argument("--state", default="paper_state_adaptive.json")
     parser.add_argument("--reset", action="store_true", help="Start a fresh virtual $100 Final-Edge v3 account")
     parser.add_argument("--fee-rate", type=float, default=0.0005)
     args = parser.parse_args()
     if not math.isfinite(args.fee_rate) or not 0 <= args.fee_rate < 0.01:
         parser.error("--fee-rate must be finite and in [0, 0.01)")
     bot = V2PaperHunter(args.state, args.fee_rate, args.reset)
-    v2.log.info("PAPER | margin=10% of wallet | leverage=50x | Final-Edge v3 | hard stop=8% | trail arm=1.5% | max_positions=4")
-    v2.log.warning("V2 paper account does not model liquidation, funding or slippage")
+    v2.log.info("PAPER | adaptive risk and execution")
+    v2.log.warning("Paper liquidation and fills are estimates; funding is not modeled")
     try:
         asyncio.run(bot.start())
     except KeyboardInterrupt:
