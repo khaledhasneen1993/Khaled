@@ -73,7 +73,7 @@ class PaperExchange:
         closing = bool((params or {}).get("reduceOnly", False))
         position = self.positions.get(symbol)
         if closing and (not position or position["side"] == side
-                        or amount > position["amount"] + 1e-12):
+                        or amount != position["amount"]):
             raise ValueError("Invalid reduce-only close")
         if not closing and position:
             raise ValueError("Position already exists")
@@ -86,12 +86,7 @@ class PaperExchange:
                 1 if position["side"] == "buy" else -1
             )
             self.balance += pnl - fee
-            if math.isclose(amount, position["amount"], rel_tol=0, abs_tol=1e-12):
-                del self.positions[symbol]
-            else:
-                remaining = position["amount"] - amount
-                position["margin"] *= remaining / position["amount"]
-                position["amount"] = remaining
+            del self.positions[symbol]
         else:
             limits = self.market_data.market(symbol).get("limits", {})
             for key, value in (("amount", amount), ("cost", notional)):
@@ -126,8 +121,7 @@ class PaperExchange:
 class PaperState:
     def restore(self):
         state = json.loads(self.state_path.read_text(encoding="utf-8"))
-        if (state["version"] != 1 or (state["settings"] != self.settings()
-                    and not self.is_legacy_settings(state["settings"]))
+        if (state["version"] != 1 or state["settings"] != self.settings()
                 or state["fee_rate"] != self.exchange.fee_rate):
             raise ValueError("State settings differ; use a new --state path or --reset")
         wallet = float(state["balance_usdt"])
@@ -140,12 +134,8 @@ class PaperState:
         self.positions = state["strategy_positions"]
         self.last_trade = state["last_trade"]
         self.last_loss = state.get("last_loss", {})
-        self.consecutive_losses = state.get("consecutive_losses", 0)
-        self.equity_peak = state.get("equity_peak", max(100.0, self.exchange.equity))
         if set(self.positions) != set(self.exchange.positions):
             raise ValueError("Inconsistent saved positions")
-        if state["settings"] != self.settings():
-            self.migrate_legacy_positions()
 
     def save(self):
         state = {
@@ -156,8 +146,7 @@ class PaperState:
             "account_positions": self.exchange.positions,
             "strategy_positions": self.positions, "prices": self.exchange.prices,
             "last_trade": self.last_trade, "trades": self.exchange.trades,
-            "last_loss": self.last_loss, "consecutive_losses": self.consecutive_losses,
-            "equity_peak": self.equity_peak,
+            "last_loss": self.last_loss,
         }
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.state_path.with_suffix(self.state_path.suffix + ".tmp")

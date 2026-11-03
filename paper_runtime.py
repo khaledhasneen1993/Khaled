@@ -2,8 +2,6 @@
 
 import asyncio
 from pathlib import Path
-from datetime import datetime
-import time
 
 import ccxt.async_support as ccxt
 
@@ -29,8 +27,6 @@ class DynamicPaperHunter(dynamic.CascadeHunter, PaperState):
         self.positions = {}
         self.last_trade = {}
         self.last_loss = {}
-        self.consecutive_losses = 0
-        self.equity_peak = self.exchange.equity
         self.lock = asyncio.Lock()
         self.state_path = Path(state_path)
         if self.state_path.exists() and not reset:
@@ -39,50 +35,12 @@ class DynamicPaperHunter(dynamic.CascadeHunter, PaperState):
 
     def settings(self):
         return {"mode": "dynamic_scan", **{name: getattr(self.strategy, name) for name in (
-            "LEVERAGE", "FIXED_MARGIN_USDT", "CASCADE_THRESHOLD", "VOLUME_SPIKE",
-            "HARD_STOP_PCT", "FAST_ADVERSE_PCT", "PARTIAL_LEVEL", "PARTIAL_FRAC",
-            "POST_PARTIAL_STOP_FROM_ENTRY", "POST_PARTIAL_STOP_FROM_PRICE",
-            "BREAKEVEN_ARM_PCT", "BREAKEVEN_LOCK_PCT",
-            "MIN_SIGNAL_STRENGTH", "SAME_SYMBOL_LOSS_COOLDOWN", "MAX_CONSECUTIVE_LOSSES",
-            "SURVIVAL_DRAWDOWN", "SURVIVAL_MARGIN_MULT", "FAST_WINDOW_SEC",
-            "COOLDOWN_SEC", "SCAN_INTERVAL",
-            "MAX_SYMBOLS_TO_SCAN", "MAX_CONCURRENT_POSITIONS", "MIN_QUOTE_VOLUME",
-        )},
-                "TRAIL_LEVELS": [list(level) for level in self.strategy.TRAIL_LEVELS]}
-
-    def is_legacy_settings(self, settings):
-        current = self.settings()
-        keys = ("mode", "position_basis", "stop_basis", "LEVERAGE", "FIXED_MARGIN_USDT",
-                "CASCADE_THRESHOLD", "VOLUME_SPIKE", "COOLDOWN_SEC", "SCAN_INTERVAL",
-                "MAX_SYMBOLS_TO_SCAN", "MAX_CONCURRENT_POSITIONS", "MIN_QUOTE_VOLUME")
-        legacy = {key: current[key] for key in keys if key in current}
-        legacy.update(STOP_LOSS_PCT=0.03, PARTIAL_LOSS_PCT=0.015,
-                      TRAIL_START_PCT=0.01, TRAIL_STEP_PCT=0.005)
-        return settings == legacy
-
-    def migrate_legacy_positions(self):
-        for symbol, p in self.positions.items():
-            fills = []
-            for fill in reversed(self.exchange.trades):
-                if fill["symbol"] == symbol:
-                    fills.append(fill)
-                    if not fill["reduceOnly"]:
-                        break
-            entry = p["entry"]
-            direction = 1 if p["side"] == "buy" else -1
-            partial = p.pop("partial_closed")
-            lock = p.pop("trail_level") * 0.005
-            p.pop("tp", None)
-            opened = datetime.fromisoformat(fills[-1]["timestamp"]).timestamp() if fills else time.time()
-            p.update(original_entry=entry, entry_time=opened, partial_done=partial,
-                     trail_locked=lock, max_adverse=0.0, max_favorable=0.0,
-                     fast_checked=time.time() - opened > self.strategy.FAST_WINDOW_SEC,
-                     stop_kind="TRAILING_SL" if lock else "POST_PARTIAL" if partial else "SL",
-                     net_pnl=sum(f["pnl_usdt"] - f["fee_usdt"] for f in fills))
-            stop = self.strategy.HARD_STOP_PCT
-            if partial:
-                stop = self.strategy.POST_PARTIAL_STOP_FROM_ENTRY
-            self.tighten_stop(p, entry * (1 - direction * stop), p["stop_kind"])
+            "LEVERAGE", "MAX_POSITION_PCT", "CASCADE_THRESHOLD", "VOLUME_SPIKE",
+            "ORDERBOOK_IMBALANCE", "HARD_STOP_PCT", "TRAIL_ARM_PCT", "TRAIL_DISTANCE_PCT",
+            "MIN_SIGNAL_STRENGTH", "SAME_SYMBOL_LOSS_COOLDOWN", "COOLDOWN_SEC",
+            "SCAN_INTERVAL", "MAX_SYMBOLS_TO_SCAN", "MAX_CONCURRENT_POSITIONS",
+            "MIN_QUOTE_VOLUME",
+        )}}
 
     async def enter(self, symbol, side, price):
         # ContinuousScanner owns the entry lock; do not acquire it again here.

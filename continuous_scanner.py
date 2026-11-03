@@ -193,8 +193,8 @@ class ContinuousScanner:
             if (signal is None or symbol in self.bot.positions
                     or len(self.bot.positions) >= self.config.MAX_CONCURRENT_POSITIONS):
                 return
-            if not ((signal["side"] == "buy" and imbalance > 0.35)
-                    or (signal["side"] == "sell" and imbalance < -0.35)):
+            if not ((signal["side"] == "buy" and imbalance > self.config.ORDERBOOK_IMBALANCE)
+                    or (signal["side"] == "sell" and imbalance < -self.config.ORDERBOOK_IMBALANCE)):
                 return
             strength = abs(signal["ret"]) * signal["spike"] * abs(imbalance)
             if strength < self.config.MIN_SIGNAL_STRENGTH:

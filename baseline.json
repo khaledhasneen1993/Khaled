@@ -1,6 +1,6 @@
 {
   "name": "Cascade Hunter Khaled",
-  "version": "2.2.0-PAAE",
+  "version": "3.0.0-FINAL-EDGE",
   "status": "approved",
   "approved_on": "2026-11-03",
   "python": ">=3.11",
@@ -8,11 +8,11 @@
   "local_entrypoint": "binance_cascade_hunter_dynamic_v2_paper.py",
   "mode": "paper_only",
   "initial_balance_usdt": 100,
-  "position_basis": "fixed_margin",
-  "leverage": 10,
-  "max_concurrent_positions": 6,
+  "position_basis": "wallet_total",
+  "leverage": 50,
+  "max_concurrent_positions": 4,
   "stop_basis": "entry_fill_price",
-  "stop_loss_pct": 0.028,
+  "stop_loss_pct": 0.08,
   "cascade_threshold": 0.012,
   "volume_spike": 3.5,
   "orderbook_imbalance_threshold": 0.35,
@@ -23,46 +23,12 @@
   "exit_check_sec": 8,
   "fee_rate": 0.0005,
   "dashboard_url": "http://127.0.0.1:8787",
-  "fixed_margin_usdt": 10,
-  "trail_start_pct": 0.008,
-  "partial_loss_pct": 0.015,
-  "path_aware_adaptive_exit_enabled": true,
-  "fast_adverse_pct": 0.01,
-  "fast_window_sec": 25,
-  "partial_frac": 0.5,
-  "post_partial_stop_from_entry": 0.018,
-  "post_partial_stop_from_price": 0.006,
-  "breakeven_arm_pct": 0.004,
-  "breakeven_lock_pct": 0.0005,
-  "trail_levels": [
-    [
-      0.008,
-      0
-    ],
-    [
-      0.012,
-      0.005
-    ],
-    [
-      0.018,
-      0.01
-    ],
-    [
-      0.025,
-      0.015
-    ],
-    [
-      0.035,
-      0.022
-    ],
-    [
-      0.05,
-      0.03
-    ]
-  ],
-  "min_signal_strength": 0.025,
-  "same_symbol_loss_cooldown": 900,
-  "max_consecutive_losses": 3,
-  "survival_drawdown": 0.05,
-  "survival_margin_mult": 0.5
+  "partial_loss_pct": null,
+  "path_aware_adaptive_exit_enabled": false,
+  "min_signal_strength": 0.02,
+  "same_symbol_loss_cooldown": 600,
+  "margin_fraction_per_position": 0.1,
+  "trail_arm_pct": 0.015,
+  "trail_distance_pct": 0.006,
+  "notes": "No partials. Compound margin. Trail after +1.5%. Hard stop 8%."
 }

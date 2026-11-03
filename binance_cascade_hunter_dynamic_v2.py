@@ -1,5 +1,5 @@
 # language: Python 3.11+, file: binance_cascade_hunter_dynamic_v2.py
-# target: paper USDT-M with path-aware adaptive exits
+# target: paper USDT-M with Final-Edge v3 exits
 # deps: pip install ccxt pandas numpy aiohttp
 
 import asyncio
@@ -12,38 +12,23 @@ log = logging.getLogger("CASCADE")
 
 # === CONFIG ===
 
-LEVERAGE = 10
-FIXED_MARGIN_USDT = 10.0        # fixed margin per entry
-CASCADE_THRESHOLD = 0.012        # 1.2%
+LEVERAGE = 50
+MAX_POSITION_PCT = 0.10
+CASCADE_THRESHOLD = 0.012
 VOLUME_SPIKE = 3.5
-HARD_STOP_PCT = 0.028
-FAST_ADVERSE_PCT = 0.010
-PARTIAL_LEVEL = 0.015
-PARTIAL_FRAC = 0.50
-POST_PARTIAL_STOP_FROM_ENTRY = 0.018
-POST_PARTIAL_STOP_FROM_PRICE = 0.006
-BREAKEVEN_ARM_PCT = 0.004
-BREAKEVEN_LOCK_PCT = 0.0005
-TRAIL_LEVELS = [
-    (0.008, 0.000),
-    (0.012, 0.005),
-    (0.018, 0.010),
-    (0.025, 0.015),
-    (0.035, 0.022),
-    (0.050, 0.030),
-]
-MIN_SIGNAL_STRENGTH = 0.025
-SAME_SYMBOL_LOSS_COOLDOWN = 900
-MAX_CONSECUTIVE_LOSSES = 3
-SURVIVAL_DRAWDOWN = 0.05
-SURVIVAL_MARGIN_MULT = 0.50
-FAST_WINDOW_SEC = 25
+ORDERBOOK_IMBALANCE = 0.35
 COOLDOWN_SEC = 8
+SCAN_INTERVAL = 600
+MAX_SYMBOLS_TO_SCAN = 40
+MAX_CONCURRENT_POSITIONS = 4
+MIN_QUOTE_VOLUME = 15_000_000
 
-SCAN_INTERVAL = 600              # 10 دقائق
-MAX_SYMBOLS_TO_SCAN = 40         # أعلى 40 عملة سيولة
-MAX_CONCURRENT_POSITIONS = 6     # أقصى عدد مراكز مفتوحة في نفس الوقت
-MIN_QUOTE_VOLUME = 15_000_000    # حجم تداول 24 ساعة أدنى (USDT)
+HARD_STOP_PCT = 0.08
+TRAIL_ARM_PCT = 0.015
+TRAIL_DISTANCE_PCT = 0.006
+MIN_SIGNAL_STRENGTH = 0.020
+SAME_SYMBOL_LOSS_COOLDOWN = 600
+
 
 class CascadeHunter:
     """V2 strategy methods; execution is supplied by the virtual account runtime."""
@@ -103,8 +88,8 @@ class CascadeHunter:
 
             imb = await self.get_orderbook_imbalance(symbol)
 
-            long_sig = ret_1m > CASCADE_THRESHOLD and vol_spike > VOLUME_SPIKE and imb > 0.35
-            short_sig = ret_1m < -CASCADE_THRESHOLD and vol_spike > VOLUME_SPIKE and imb < -0.35
+            long_sig = ret_1m > CASCADE_THRESHOLD and vol_spike > VOLUME_SPIKE and imb > ORDERBOOK_IMBALANCE
+            short_sig = ret_1m < -CASCADE_THRESHOLD and vol_spike > VOLUME_SPIKE and imb < -ORDERBOOK_IMBALANCE
 
             strength = abs(ret_1m) * vol_spike * abs(imb)
 
@@ -124,11 +109,8 @@ class CascadeHunter:
 
     async def size_position(self, symbol):
         price = (await self.exchange.fetch_ticker(symbol))["last"]
-        self.equity_peak = max(self.equity_peak, self.exchange.equity)
-        survival = (self.consecutive_losses >= MAX_CONSECUTIVE_LOSSES
-                    or self.exchange.equity <= self.equity_peak * (1 - SURVIVAL_DRAWDOWN))
-        margin = FIXED_MARGIN_USDT * (SURVIVAL_MARGIN_MULT if survival else 1)
-        notional = margin * LEVERAGE
+        balance = (await self.exchange.fetch_balance())["USDT"]["total"]
+        notional = max(0.0, balance) * MAX_POSITION_PCT * LEVERAGE
         amount = notional / price
         amount = float(self.exchange.amount_to_precision(symbol, amount))
         return amount
@@ -159,9 +141,8 @@ class CascadeHunter:
             self.positions[symbol] = {
                 "side": side, "entry": price, "original_entry": price, "amount": amount,
                 "sl": price * (1 - direction * HARD_STOP_PCT), "stop_kind": "SL",
-                "partial_done": False, "trail_locked": 0.0, "entry_time": time.time(),
-                "max_adverse": 0.0, "max_favorable": 0.0, "fast_checked": False,
-                "net_pnl": -order["fee_usdt"],
+                "trailing": False, "best_price": price, "entry_time": time.time(),
+                "entry_fee": order["fee_usdt"],
             }
             log.info(f"ENTER {side.upper()} {symbol} size={amount:.4f} @ {price:.4f}")
             return True
@@ -169,92 +150,40 @@ class CascadeHunter:
             log.error(f"Entry failed {symbol}: {e}")
             return False
 
-    def tighten_stop(self, p, candidate, kind):
-        direction = 1 if p["side"] == "buy" else -1
-        if direction * (candidate - p["sl"]) > 0:
-            p["sl"] = candidate
-            p["stop_kind"] = kind
-
-    def register_loss(self, symbol):
-        self.last_loss[symbol] = time.time()
-        self.consecutive_losses += 1
-
-    def register_win(self):
-        self.consecutive_losses = 0
-
-    async def partial_close(self, position_id, fraction, price, reason):
-        p = self.positions[position_id]
-        try:
-            amount = float(self.exchange.amount_to_precision(position_id, p["amount"] * fraction))
-            if not 0 < amount < p["amount"]:
-                return False
-            side = "sell" if p["side"] == "buy" else "buy"
-            fill = await self.exchange.create_order(
-                position_id, "market", side, amount, params={"reduceOnly": True}
-            )
-        except Exception as error:
-            log.warning("Partial close failed %s: %s", position_id, error)
-            return False
-        p["amount"] = self.exchange.positions[position_id]["amount"]
-        p["net_pnl"] += fill["pnl_usdt"] - fill["fee_usdt"]
-        self.record_exit_reason(position_id, reason, price)
-        return True
-
-    async def close_position(self, symbol, p, price, reason):
+    async def close_position(self, symbol, p, price):
         side = "sell" if p["side"] == "buy" else "buy"
         fill = await self.exchange.create_order(
             symbol, "market", side, p["amount"], params={"reduceOnly": True}
         )
-        self.record_exit_reason(symbol, reason, price)
+        self.record_exit_reason(symbol, p["stop_kind"], price)
         del self.positions[symbol]
-        net = p["net_pnl"] + fill["pnl_usdt"] - fill["fee_usdt"]
-        if net > 0:
-            self.register_win()
-        elif net < 0 or reason in ("FAST_ADVERSE", "SL"):
-            self.register_loss(symbol)
-        log.info("EXIT %s %s @ %.8g | net=%.6f", reason, symbol, price, net)
+        net = fill["pnl_usdt"] - fill["fee_usdt"] - p["entry_fee"]
+        if net < 0:
+            self.last_loss[symbol] = time.time()
+        log.info("EXIT %s %s @ %.8g | net=%.6f", p["stop_kind"], symbol, price, net)
 
     async def manage_exits(self):
         for symbol, p in list(self.positions.items()):
             try:
                 price = float((await self.exchange.fetch_ticker(symbol))["last"])
-                self.equity_peak = max(self.equity_peak, self.exchange.equity)
-                entry = p["original_entry"]
                 direction = 1 if p["side"] == "buy" else -1
-                move = direction * (price / entry - 1)
-                adverse = max(0.0, -move)
-                p["max_adverse"] = max(p["max_adverse"], adverse)
-                p["max_favorable"] = max(p["max_favorable"], move)
-                eps = 1e-12
-                if direction * (price - p["sl"]) <= entry * eps:
-                    await self.close_position(symbol, p, price, p["stop_kind"])
+                if direction * (price - p["sl"]) <= p["entry"] * 1e-12:
+                    await self.close_position(symbol, p, price)
                     continue
 
-                age = time.time() - p["entry_time"]
-                if age <= FAST_WINDOW_SEC and adverse + eps >= FAST_ADVERSE_PCT and not p["partial_done"]:
-                    await self.close_position(symbol, p, price, "FAST_ADVERSE")
-                    continue
-                if age > FAST_WINDOW_SEC:
-                    p["fast_checked"] = True
-                    if not p["partial_done"] and adverse + eps >= PARTIAL_LEVEL:
-                        if await self.partial_close(symbol, PARTIAL_FRAC, price, "PARTIAL_SL"):
-                            p["partial_done"] = True
-                            entry_stop = entry * (1 - direction * POST_PARTIAL_STOP_FROM_ENTRY)
-                            price_stop = price * (1 - direction * POST_PARTIAL_STOP_FROM_PRICE)
-                            candidate = max(entry_stop, price_stop) if direction == 1 else min(entry_stop, price_stop)
-                            self.tighten_stop(p, candidate, "POST_PARTIAL")
-                            # A gap can leave the new stop already crossed.
-                            if direction * (price - p["sl"]) <= entry * eps:
-                                await self.close_position(symbol, p, price, p["stop_kind"])
-                                continue
+                move = direction * (price / p["entry"] - 1)
+                if not p["trailing"]:
+                    if move + 1e-12 < TRAIL_ARM_PCT:
+                        continue
+                    p["trailing"] = True
+                    p["best_price"] = price
+                elif direction * (price - p["best_price"]) > 0:
+                    p["best_price"] = price
 
-                if p["partial_done"] and move + eps >= BREAKEVEN_ARM_PCT:
-                    self.tighten_stop(p, entry * (1 + direction * BREAKEVEN_LOCK_PCT), "BE_AFTER_PARTIAL")
-                for trigger, locked in TRAIL_LEVELS:
-                    if move + eps < trigger:
-                        break
-                    self.tighten_stop(p, entry * (1 + direction * locked), "TRAILING_SL")
-                    p["trail_locked"] = max(p["trail_locked"], locked)
+                candidate = p["best_price"] * (1 - direction * TRAIL_DISTANCE_PCT)
+                if direction * (candidate - p["sl"]) > 0:
+                    p["sl"] = candidate
+                    p["stop_kind"] = "TRAILING_SL"
             except Exception as error:
                 log.error("Exit check failed %s: %s", symbol, error)
 

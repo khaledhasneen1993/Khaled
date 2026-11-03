@@ -146,7 +146,7 @@ class ContinuousTests(unittest.IsolatedAsyncioTestCase):
         self.data.price = 105
         await self.bot.manage_exits()
         self.assertIn(BTC, self.bot.positions)
-        self.data.price = 103.53
+        self.data.price = 104.37
         await self.bot.manage_exits()
         self.assertNotIn(BTC, self.bot.positions)
 
