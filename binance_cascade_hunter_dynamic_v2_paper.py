@@ -45,7 +45,7 @@ def main():
     if not math.isfinite(args.fee_rate) or not 0 <= args.fee_rate < 0.01:
         parser.error("--fee-rate must be finite and in [0, 0.01)")
     bot = V2PaperHunter(args.state, args.fee_rate, args.reset)
-    v2.log.info("V2 PAPER | margin=10 USDT per trade | leverage=10x | SL=3%% PRICE | half=-1.5%% | step trailing | max_positions=6")
+    v2.log.info("V2 PAPER | base margin=10 USDT | leverage=10x | PAAE | hard stop=2.8%% | fast adverse=1%%/25s | max_positions=6")
     v2.log.warning("V2 paper account does not model liquidation, funding or slippage")
     try:
         asyncio.run(bot.start())

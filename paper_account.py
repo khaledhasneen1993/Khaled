@@ -126,7 +126,8 @@ class PaperExchange:
 class PaperState:
     def restore(self):
         state = json.loads(self.state_path.read_text(encoding="utf-8"))
-        if (state["version"] != 1 or state["settings"] != self.settings()
+        if (state["version"] != 1 or (state["settings"] != self.settings()
+                    and not self.is_legacy_settings(state["settings"]))
                 or state["fee_rate"] != self.exchange.fee_rate):
             raise ValueError("State settings differ; use a new --state path or --reset")
         wallet = float(state["balance_usdt"])
@@ -138,8 +139,13 @@ class PaperState:
         self.exchange.trades = state["trades"]
         self.positions = state["strategy_positions"]
         self.last_trade = state["last_trade"]
+        self.last_loss = state.get("last_loss", {})
+        self.consecutive_losses = state.get("consecutive_losses", 0)
+        self.equity_peak = state.get("equity_peak", max(100.0, self.exchange.equity))
         if set(self.positions) != set(self.exchange.positions):
             raise ValueError("Inconsistent saved positions")
+        if state["settings"] != self.settings():
+            self.migrate_legacy_positions()
 
     def save(self):
         state = {
@@ -150,6 +156,8 @@ class PaperState:
             "account_positions": self.exchange.positions,
             "strategy_positions": self.positions, "prices": self.exchange.prices,
             "last_trade": self.last_trade, "trades": self.exchange.trades,
+            "last_loss": self.last_loss, "consecutive_losses": self.consecutive_losses,
+            "equity_peak": self.equity_peak,
         }
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.state_path.with_suffix(self.state_path.suffix + ".tmp")

@@ -1,8 +1,8 @@
 {
   "name": "Cascade Hunter Khaled",
-  "version": "2.1.0",
+  "version": "2.2.0-PAAE",
   "status": "approved",
-  "approved_on": "2026-11-02",
+  "approved_on": "2026-11-03",
   "python": ">=3.11",
   "primary_entrypoint": "run_paper_live.py",
   "local_entrypoint": "binance_cascade_hunter_dynamic_v2_paper.py",
@@ -12,7 +12,7 @@
   "leverage": 10,
   "max_concurrent_positions": 6,
   "stop_basis": "entry_fill_price",
-  "stop_loss_pct": 0.03,
+  "stop_loss_pct": 0.028,
   "cascade_threshold": 0.012,
   "volume_spike": 3.5,
   "orderbook_imbalance_threshold": 0.35,
@@ -25,7 +25,45 @@
   "dashboard_upload_sec": 10,
   "dashboard_url": "https://cascade-v2-khaled-live.tinyfairy8192.chatgpt.site/",
   "fixed_margin_usdt": 10,
-  "trail_start_pct": 0.01,
-  "trail_step_pct": 0.005,
-  "partial_loss_pct": 0.015
+  "trail_start_pct": 0.008,
+  "partial_loss_pct": 0.015,
+  "path_aware_adaptive_exit_enabled": true,
+  "fast_adverse_pct": 0.01,
+  "fast_window_sec": 25,
+  "partial_frac": 0.5,
+  "post_partial_stop_from_entry": 0.018,
+  "post_partial_stop_from_price": 0.006,
+  "breakeven_arm_pct": 0.004,
+  "breakeven_lock_pct": 0.0005,
+  "trail_levels": [
+    [
+      0.008,
+      0
+    ],
+    [
+      0.012,
+      0.005
+    ],
+    [
+      0.018,
+      0.01
+    ],
+    [
+      0.025,
+      0.015
+    ],
+    [
+      0.035,
+      0.022
+    ],
+    [
+      0.05,
+      0.03
+    ]
+  ],
+  "min_signal_strength": 0.025,
+  "same_symbol_loss_cooldown": 900,
+  "max_consecutive_losses": 3,
+  "survival_drawdown": 0.05,
+  "survival_margin_mult": 0.5
 }

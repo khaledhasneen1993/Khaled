@@ -28,14 +28,14 @@ class LiveTests(unittest.IsolatedAsyncioTestCase):
         fill=self.bot.exchange.trades[0]
         self.assertEqual(fill['entry_reason'],'CASCADE_MOVE_VOLUME_ORDERBOOK')
         self.assertAlmostEqual(fill['entry_signal']['imbalance'],.8)
-        self.assertAlmostEqual(fill['stop_loss_price'],98.94)
+        self.assertAlmostEqual(fill['stop_loss_price'],99.144)
         self.data.price=105
         await self.bot.manage_exits()
-        self.data.price=104.04
+        self.data.price=103.53
         await self.bot.manage_exits()
         closed=self.bot.exchange.trades[-1]
         self.assertEqual(closed['exit_reason'],'TRAILING_SL')
-        self.assertEqual(closed['trigger_price'],104.04)
+        self.assertEqual(closed['trigger_price'],103.53)
         restored=V2PaperHunter(self.path,fee_rate=0,market_data=self.data)
         self.assertEqual(restored.exchange.trades,self.bot.exchange.trades)
 

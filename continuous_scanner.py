@@ -196,10 +196,13 @@ class ContinuousScanner:
             if not ((signal["side"] == "buy" and imbalance > 0.35)
                     or (signal["side"] == "sell" and imbalance < -0.35)):
                 return
+            strength = abs(signal["ret"]) * signal["spike"] * abs(imbalance)
+            if strength < self.config.MIN_SIGNAL_STRENGTH:
+                return
             # First eligible completed check gets the slot; do not wait for all symbols.
             if await self.bot.enter(symbol, signal["side"], signal["price"]):
                 if hasattr(self.bot, "record_entry_signal"):
-                    self.bot.record_entry_signal(symbol, {**signal, "imbalance": imbalance})
+                    self.bot.record_entry_signal(symbol, {**signal, "imbalance": imbalance, "strength": strength})
                 self.entries += 1
                 self.config.log.info("CONTINUOUS ENTRY %s | move=%.3f%% volume=%.2fx imbalance=%.3f",
                                 symbol, signal["ret"] * 100, signal["spike"], imbalance)
@@ -289,3 +292,4 @@ class ContinuousScanner:
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+
