@@ -8,6 +8,9 @@ import ccxt.async_support as ccxt
 import binance_cascade_hunter_dynamic_v2 as dynamic
 from paper_account import PaperState, PaperExchange
 from continuous_scanner import ContinuousScanner
+from risk.config import load_config
+from journal.trade_journal import exit_record
+from datetime import datetime
 
 
 class DynamicPaperExchange(PaperExchange):
@@ -19,11 +22,13 @@ class DynamicPaperHunter(dynamic.CascadeHunter, PaperState):
     def __init__(self, state_path="paper_state_dynamic_v2.json", fee_rate=0.0005,
                  reset=False, market_data=None, strategy_config=dynamic):
         self.strategy = strategy_config
+        self.cfg = load_config()
         # Only public market data is used; all fills go through PaperExchange.
         public = market_data if market_data is not None else ccxt.binanceusdm({
             "enableRateLimit": True, "options": {"defaultType": "future"},
         })
         self.exchange = DynamicPaperExchange(public, fee_rate, leverage=self.strategy.LEVERAGE)
+        self.exchange.cfg = self.cfg
         self.positions = {}
         self.last_trade = {}
         self.lock = asyncio.Lock()
@@ -33,7 +38,8 @@ class DynamicPaperHunter(dynamic.CascadeHunter, PaperState):
         self.scanner = ContinuousScanner(self, config=self.strategy)
 
     def settings(self):
-        return {"mode": "dynamic_scan", **{name: getattr(self.strategy, name) for name in (
+        return {"mode": "dynamic_scan", "active_exit": {key: self.cfg[key] for key in ("tp_sl", "atr", "exit")},
+                **{name: getattr(self.strategy, name) for name in (
             "LEVERAGE", "MAX_POSITION_PCT", "CASCADE_THRESHOLD", "VOLUME_SPIKE",
             "TAKE_PROFIT_PCT", "STOP_LOSS_PCT", "COOLDOWN_SEC", "SCAN_INTERVAL",
             "MAX_SYMBOLS_TO_SCAN", "MAX_CONCURRENT_POSITIONS", "MIN_QUOTE_VOLUME",
@@ -61,6 +67,11 @@ class DynamicPaperHunter(dynamic.CascadeHunter, PaperState):
             if trade["symbol"] == symbol and trade["reduceOnly"]:
                 trade["exit_reason"] = reason
                 trade["trigger_price"] = float(trigger_price)
+                position = self.positions[symbol]
+                trade["exit_detail"] = exit_record(
+                    position, "stop_loss" if reason == "SL" else "take_profit",
+                    trade["price"], datetime.fromisoformat(trade["timestamp"]).timestamp(),
+                    trade["fee_usdt"])
                 break
 
     async def manage_exits(self):

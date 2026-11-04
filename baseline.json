@@ -25,5 +25,24 @@
   "exit_check_sec": 8,
   "fee_rate": 0.0005,
   "dashboard_upload_sec": 10,
-  "dashboard_url": "https://cascade-v2-khaled-live.tinyfairy8192.chatgpt.site/"
+  "dashboard_url": "https://cascade-v2-khaled-live.tinyfairy8192.chatgpt.site/",
+  "tp_sl": {
+    "atr_stop_mult": 1.5,
+    "atr_tp_mult": 2.5,
+    "min_stop_pct": 0.008,
+    "min_rr": 1.5,
+    "mmr": 0.004,
+    "liq_safety_margin": 0.003,
+    "max_equity_risk_pct": 0.03
+  },
+  "atr": {
+    "period": 14,
+    "fallback_atr_pct": 0.004
+  },
+  "exit": {
+    "be_trigger_pct": 0.006,
+    "be_offset_pct": 0.001,
+    "trail_enabled": true,
+    "trail_atr_mult": 1.2
+  }
 }

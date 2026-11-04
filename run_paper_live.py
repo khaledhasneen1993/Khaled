@@ -190,7 +190,7 @@ def main():
         parser.error("Set CASCADE_DASHBOARD_TOKEN, or use --legacy-dashboard with a valid config")
     if cloud_publisher:
         log.info("COMBINED DASHBOARD TELEMETRY ENABLED | session=%s", session_id)
-    log.info("LIVE V2 PAPER | state=%s | margin=10%% | leverage=50x | price SL=15%% | max=3", state_path)
+    log.info("LIVE V2 PAPER | state=%s | margin=10%% | leverage=50x | ATR TP/SL | max=3", state_path)
     log.warning("Paper model excludes liquidation, funding and slippage")
     try:
         asyncio.run(run(bot, publisher, cloud_publisher))

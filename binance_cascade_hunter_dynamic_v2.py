@@ -1,11 +1,15 @@
 # language: Python 3.11+, file: binance_cascade_hunter_dynamic_v2.py
-# target: Binance USDT-M Futures — V2: 10% wallet margin, 50x, 15% price stop, max 3
+# target: Binance USDT-M Futures — V2 entries, adaptive TP/SL, paper execution
 # deps: pip install ccxt pandas numpy aiohttp
 
 import asyncio
 import pandas as pd
 from datetime import datetime, timezone
 import logging
+from types import SimpleNamespace
+from risk.config import load_config
+from risk.atr_levels import compute_atr
+from risk.dynamic_stop import update_dynamic_stop
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(message)s")
 log = logging.getLogger("CASCADE")
@@ -30,6 +34,28 @@ class CascadeHunter:
 
     def __init__(self):
         raise RuntimeError("Use V2PaperHunter or run_paper_live.py for the paper account")
+
+    async def exit_atr(self, symbol, price):
+        """Reuse scanner candles; missing data never filters an entry signal."""
+        cfg = getattr(self, "cfg", None) or load_config()
+        cache = getattr(self, "_exit_atr_cache", None)
+        if cache is None:
+            self._exit_atr_cache = cache = {}
+        rows = list(getattr(getattr(self, "scanner", None), "histories", {}).get(symbol, ()))
+        try:
+            if not rows:
+                rows = await self.exchange.fetch_ohlcv(symbol, "1m", limit=cfg["atr"]["period"] + 1)
+            candles = [{"high": r[2], "low": r[3], "close": r[4]} for r in rows]
+            atr = compute_atr(candles, cfg["atr"]["period"])
+            cache[symbol] = atr
+            return atr, "candles"
+        except (OSError, ValueError, KeyError, IndexError, TypeError) as error:
+            log.warning("ATR unavailable %s (%s); using cached/fallback ATR", symbol, type(error).__name__)
+        except Exception as error:
+            log.warning("ATR feed unavailable %s (%s); using cached/fallback ATR", symbol, type(error).__name__)
+        if symbol in cache:
+            return cache[symbol], "cached"
+        return price * cfg["atr"]["fallback_atr_pct"], "fallback"
 
     async def set_leverage(self, symbol):
         try:
@@ -123,19 +149,14 @@ class CascadeHunter:
             return False
 
         try:
+            atr, atr_source = await self.exit_atr(symbol, price)
             await self.set_leverage(symbol)
-            await self.exchange.create_order(
+            fill = await self.exchange.create_order(
                 symbol, "market", side, amount,
-                params={"reduceOnly": False}
+                params={"reduceOnly": False, "exit_atr": atr, "atr_source": atr_source}
             )
             self.last_trade[symbol] = now
-            self.positions[symbol] = {
-                "side": side,
-                "entry": price,
-                "amount": amount,
-                "tp": price * (1 + TAKE_PROFIT_PCT) if side == "buy" else price * (1 - TAKE_PROFIT_PCT),
-                "sl": price * (1 - STOP_LOSS_PCT) if side == "buy" else price * (1 + STOP_LOSS_PCT)
-            }
+            self.positions[symbol] = fill["risk_position"]
             log.info(f"ENTER {side.upper()} {symbol} size={amount:.4f} @ {price:.4f}")
             return True
         except Exception as e:
@@ -148,7 +169,35 @@ class CascadeHunter:
             try:
                 ticker = await self.exchange.fetch_ticker(symbol)
                 price = ticker["last"]
-
+                from paper_account import Position, make_position
+                cfg = getattr(self, "cfg", None) or load_config()
+                atr, source = await self.exit_atr(symbol, price)
+                if "stop_initial" not in pos:
+                    # Upgrade pre-feature saved positions before their first exit check.
+                    account = self.exchange.positions[symbol]
+                    opening = next((t for t in reversed(self.exchange.trades)
+                                    if t["symbol"] == symbol and not t["reduceOnly"]), None)
+                    upgraded = make_position(pos["side"], account["entry"], pos["amount"],
+                                             self.exchange.leverage, atr, cfg,
+                                             self.exchange.equity, self.exchange.fee_rate,
+                                             opened_at=datetime.fromisoformat(opening["timestamp"]).timestamp() if opening else None,
+                                             signal_id=opening["id"] if opening else None,
+                                             atr_source=source)
+                    if opening:
+                        upgraded["entry_fee"] = opening["fee_usdt"]
+                    pos = self.positions[symbol] = upgraded
+                    pos["legacy_migrated"] = True
+                elif not isinstance(pos, Position):
+                    pos = self.positions[symbol] = Position(pos)
+                sm = 1 if pos["side"] == "buy" else -1
+                previous_stop = pos.stop
+                fee = self.exchange.fee_rate
+                exit_cfg = {**cfg["exit"], "be_offset_pct": max(
+                    cfg["exit"]["be_offset_pct"], 2 * fee / (1 - sm * fee))}
+                update_dynamic_stop(pos, SimpleNamespace(price=price, atr=atr), exit_cfg)
+                be_stop = pos.entry * (1 + sm * exit_cfg["be_offset_pct"])
+                if sm * (pos.stop - previous_stop) > 0 and sm * (pos.stop - be_stop) > 0:
+                    pos["trail_moved"] = True
                 hit_tp = (pos["side"] == "buy" and price >= pos["tp"]) or \
                          (pos["side"] == "sell" and price <= pos["tp"])
                 hit_sl = (pos["side"] == "buy" and price <= pos["sl"]) or \
@@ -160,7 +209,7 @@ class CascadeHunter:
                         symbol, "market", close_side, pos["amount"],
                         params={"reduceOnly": True}
                     )
-                    reason = "TP" if hit_tp else "SL"
+                    reason = "SL" if hit_sl else "TP"
                     if hasattr(self, "record_exit_reason"):
                         self.record_exit_reason(symbol, reason, price)
                     log.info(f"EXIT {reason} {symbol} @ {price:.4f}")

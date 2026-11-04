@@ -1,0 +1,84 @@
+{
+  "kind": "historical_candle_exit_invariants_only",
+  "files": [
+    {
+      "filename": "BTCUSDT-1m-2026-07.zip",
+      "sha256": "f18440bb58f0c7e1ff63cbb906132002877c4914540c8aebab920da6937cff73",
+      "url": "https://data.binance.vision/data/futures/um/monthly/klines/BTCUSDT/1m/BTCUSDT-1m-2026-07.zip"
+    },
+    {
+      "filename": "BTCUSDT-1m-2026-08.zip",
+      "sha256": "adfd0846ea580681aeb18a6bdf06660dcfcc1a7b6819ea2eecfc3c53240ec67a",
+      "url": "https://data.binance.vision/data/futures/um/monthly/klines/BTCUSDT/1m/BTCUSDT-1m-2026-08.zip"
+    },
+    {
+      "filename": "BTCUSDT-1m-2026-09.zip",
+      "sha256": "e1a821b5bf6b48d57da01c3e390b8a467a698155def5c18c2c63c0eb044a3247",
+      "url": "https://data.binance.vision/data/futures/um/monthly/klines/BTCUSDT/1m/BTCUSDT-1m-2026-09.zip"
+    },
+    {
+      "filename": "ETHUSDT-1m-2026-07.zip",
+      "sha256": "5c98ad0cfa152fbe08df59838ead7c8bbfa433af943bbfb4d082626ebee2d83e",
+      "url": "https://data.binance.vision/data/futures/um/monthly/klines/ETHUSDT/1m/ETHUSDT-1m-2026-07.zip"
+    },
+    {
+      "filename": "ETHUSDT-1m-2026-08.zip",
+      "sha256": "038b412935c3349e95b4abe3e9cec8a7fd521d16ce73fff3c2f92d605b252b9e",
+      "url": "https://data.binance.vision/data/futures/um/monthly/klines/ETHUSDT/1m/ETHUSDT-1m-2026-08.zip"
+    },
+    {
+      "filename": "ETHUSDT-1m-2026-09.zip",
+      "sha256": "c85c7ec631fa7fe3a90c30e4ef6a76aeac0b88be895872388d87a6a8fd3d2892",
+      "url": "https://data.binance.vision/data/futures/um/monthly/klines/ETHUSDT/1m/ETHUSDT-1m-2026-09.zip"
+    }
+  ],
+  "symbols": {
+    "BTCUSDT": {
+      "candles": 132480,
+      "scenarios": 264932,
+      "liq_violations": 0,
+      "equity_risk_violations": 0,
+      "rr_violations": 0,
+      "stop_capped": 15,
+      "risk_capped": 264932,
+      "rr_min": 1.5,
+      "gaps": 0,
+      "start_ms": 1782864000000,
+      "end_ms": 1790812740000,
+      "start_utc": "2026-07-01T00:00:00+00:00",
+      "end_utc": "2026-09-30T23:59:00+00:00",
+      "scenario_mean_rr": 1.5007389089202465,
+      "scenario_stop_capped_fraction": 5.661830205486691e-05,
+      "scenario_risk_capped_fraction": 1.0
+    },
+    "ETHUSDT": {
+      "candles": 132480,
+      "scenarios": 264932,
+      "liq_violations": 0,
+      "equity_risk_violations": 0,
+      "rr_violations": 0,
+      "stop_capped": 67,
+      "risk_capped": 264932,
+      "rr_min": 1.5,
+      "gaps": 0,
+      "start_ms": 1782864000000,
+      "end_ms": 1790812740000,
+      "start_utc": "2026-07-01T00:00:00+00:00",
+      "end_utc": "2026-09-30T23:59:00+00:00",
+      "scenario_mean_rr": 1.5035699346532139,
+      "scenario_stop_capped_fraction": 0.00025289508251173887,
+      "scenario_risk_capped_fraction": 1.0
+    }
+  },
+  "strategy_backtest_status": "blocked_missing_historical_orderbooks_and_intrabar_events",
+  "trade_metrics": {
+    "count_before": null,
+    "count_after": null,
+    "mean_rr_planned": null,
+    "trade_stop_capped_fraction": null,
+    "stuck_over_60m_fraction": null,
+    "exit_reason_distribution": null,
+    "max_drawdown": null,
+    "rolling_100_sharpe": null
+  }
+}

@@ -30,31 +30,31 @@ class V2Tests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(await self.bot.enter("DOGE/USDT:USDT", "buy", 100))
         self.assertEqual(len(self.bot.positions), 3)
 
-    async def test_long_stop_is_fifteen_percent_price_and_tp_unchanged(self):
+    async def test_long_stop_caps_account_risk_and_tp_has_minimum_rr(self):
         await self.bot.enter("BTC/USDT:USDT", "buy", 100)
         position = self.bot.positions["BTC/USDT:USDT"]
-        self.assertAlmostEqual(position["sl"], 85)
-        self.assertAlmostEqual(position["tp"], 101.8)
-        self.data.price = 99
+        self.assertAlmostEqual(position["sl"], 99.4)
+        self.assertAlmostEqual(position["tp"], 100.9)
+        self.data.price = 99.5
         await self.bot.manage_exits()
         self.assertIn("BTC/USDT:USDT", self.bot.positions)
-        self.data.price = 85
+        self.data.price = position["sl"]
         await self.bot.manage_exits()
         self.assertFalse(self.bot.positions)
-        self.assertAlmostEqual(self.bot.exchange.balance, 25)
+        self.assertAlmostEqual(self.bot.exchange.balance, 97)
 
-    async def test_short_stop_is_fifteen_percent_price(self):
+    async def test_short_stop_caps_account_risk(self):
         await self.bot.enter("ETH/USDT:USDT", "sell", 100)
         position = self.bot.positions["ETH/USDT:USDT"]
-        self.assertAlmostEqual(position["sl"], 115)
-        self.assertAlmostEqual(position["tp"], 98.2)
-        self.data.price = 110
+        self.assertAlmostEqual(position["sl"], 100.6)
+        self.assertAlmostEqual(position["tp"], 99.1)
+        self.data.price = 100.5
         await self.bot.manage_exits()
         self.assertTrue(self.bot.positions)
-        self.data.price = 116
+        self.data.price = position["sl"]
         await self.bot.manage_exits()
         self.assertFalse(self.bot.positions)
-        self.assertAlmostEqual(self.bot.exchange.balance, 20)
+        self.assertAlmostEqual(self.bot.exchange.balance, 97)
 
     async def test_incompatible_state_rejected_without_modifying_file(self):
         self.bot.save()

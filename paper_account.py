@@ -3,9 +3,58 @@
 import asyncio
 import json
 import math
+from uuid import uuid4
 from datetime import datetime, timezone
 
 import binance_cascade_hunter_dynamic_v2 as strategy
+from risk.config import load_config
+from risk.atr_levels import compute_tp_sl
+
+
+class Position(dict):
+    """JSON-compatible existing dict, with additive dynamic-stop attributes."""
+    @property
+    def side(self):
+        return "long" if self["side"] == "buy" else "short"
+
+    @property
+    def entry(self):
+        return self["entry"]
+
+    @property
+    def stop(self):
+        return self["sl"]
+
+    @stop.setter
+    def stop(self, value):
+        self["sl"] = value
+
+    @property
+    def breakeven_armed(self):
+        return self.get("breakeven_armed", False)
+
+    @breakeven_armed.setter
+    def breakeven_armed(self, value):
+        self["breakeven_armed"] = value
+
+
+def make_position(side, entry, amount, leverage, atr, cfg, equity, fee_rate,
+                  opened_at=None, signal_id=None, atr_source="candles"):
+    sm = 1 if side == "buy" else -1
+    # Loss at stop including entry + exit fees:
+    # amount * (distance + fee * (2*entry - sm*distance)).
+    budget = equity * cfg["tp_sl"]["max_equity_risk_pct"]
+    distance_cap = (budget / amount - 2 * entry * fee_rate) / (1 - sm * fee_rate)
+    levels = compute_tp_sl(side, entry, atr, leverage,
+                           {**cfg["tp_sl"], "max_stop_distance": distance_cap})
+    return Position(side=side, entry=entry, amount=amount, tp=levels["tp"], sl=levels["stop"],
+                    stop_initial=levels["stop"], stop_pct=levels["stop_pct"],
+                    stop_pct_initial=levels["stop_pct"], tp_pct=levels["tp_pct"], rr=levels["rr"],
+                    stop_capped=levels["stop_capped"], risk_capped=levels["risk_capped"],
+                    breakeven_armed=False, trail_moved=False, atr_at_entry=atr, atr_source=atr_source,
+                    leverage=leverage, opened_at=datetime.now(timezone.utc).timestamp() if opened_at is None else opened_at,
+                    signal_id=signal_id or uuid4().hex, entry_fee=entry * amount * fee_rate,
+                    equity_at_entry=equity)
 
 
 class PaperExchange:
@@ -19,6 +68,7 @@ class PaperExchange:
         self.positions = {}
         self.prices = {}
         self.trades = []
+        self.cfg = load_config()
 
     @property
     def used(self):
@@ -98,6 +148,11 @@ class PaperExchange:
             margin = notional / self.leverage
             if margin + fee > self.free:
                 raise ValueError("Insufficient virtual margin including entry fee")
+            # Validate at the actual fill price BEFORE mutating account balances.
+            atr = (params or {}).get("exit_atr", price * self.cfg["atr"]["fallback_atr_pct"])
+            risk_position = make_position(side, price, amount, self.leverage, atr,
+                                          self.cfg, self.equity, self.fee_rate,
+                                          atr_source=(params or {}).get("atr_source", "fallback"))
             self.balance -= fee
             self.positions[symbol] = {
                 "side": side, "entry": price, "amount": amount, "margin": margin,
@@ -109,10 +164,15 @@ class PaperExchange:
             "reduceOnly": closing, "fee_usdt": fee, "pnl_usdt": pnl,
             "balance_usdt": self.balance,
         }
+        if not closing:
+            trade["signal_id"] = risk_position["signal_id"]
+            trade["take_profit_price"] = risk_position["tp"]
+            trade["stop_loss_price"] = risk_position["sl"]
         self.trades.append(trade)
         strategy.log.info("PAPER FILL %s | %s %s | wallet=%.4f free=%.4f equity=%.4f",
                           trade["id"], side, symbol, self.balance, self.free, self.equity)
-        return {**trade, "average": price, "filled": amount, "status": "closed"}
+        return {**trade, "average": price, "filled": amount, "status": "closed",
+                **({"risk_position": risk_position} if not closing else {})}
 
     async def close(self):
         await self.market_data.close()
@@ -121,7 +181,11 @@ class PaperExchange:
 class PaperState:
     def restore(self):
         state = json.loads(self.state_path.read_text(encoding="utf-8"))
-        if (state["version"] != 1 or state["settings"] != self.settings()
+        saved_settings = dict(state["settings"])
+        # Pre-feature states have no exit-config snapshot. Existing settings
+        # must still match, while positions are upgraded on their next check.
+        saved_settings.setdefault("active_exit", self.settings()["active_exit"])
+        if (state["version"] != 1 or saved_settings != self.settings()
                 or state["fee_rate"] != self.exchange.fee_rate):
             raise ValueError("State settings differ; use a new --state path or --reset")
         wallet = float(state["balance_usdt"])
@@ -131,7 +195,7 @@ class PaperState:
         self.exchange.positions = state["account_positions"]
         self.exchange.prices = state["prices"]
         self.exchange.trades = state["trades"]
-        self.positions = state["strategy_positions"]
+        self.positions = {symbol: Position(pos) for symbol, pos in state["strategy_positions"].items()}
         self.last_trade = state["last_trade"]
         if set(self.positions) != set(self.exchange.positions):
             raise ValueError("Inconsistent saved positions")

@@ -28,7 +28,8 @@ class LiveTests(unittest.IsolatedAsyncioTestCase):
         fill=self.bot.exchange.trades[0]
         self.assertEqual(fill['entry_reason'],'CASCADE_MOVE_VOLUME_ORDERBOOK')
         self.assertAlmostEqual(fill['entry_signal']['imbalance'],.8)
-        self.assertAlmostEqual(fill['stop_loss_price'],86.7)
+        self.assertEqual(fill['stop_loss_price'],self.bot.positions['BTC/USDT:USDT']['stop_initial'])
+        self.assertGreater(fill['stop_loss_price'],100)
         self.data.price=105
         await self.bot.manage_exits()
         closed=self.bot.exchange.trades[-1]
