@@ -1,6 +1,7 @@
 """Continuous paper runtime for the Final-Edge v3 strategy."""
 
 import asyncio
+import copy
 from pathlib import Path
 
 import ccxt.async_support as ccxt
@@ -46,6 +47,15 @@ class DynamicPaperHunter(dynamic.CascadeHunter, PaperState):
             "SCAN_INTERVAL", "MAX_SYMBOLS_TO_SCAN", "MAX_CONCURRENT_POSITIONS",
             "MIN_QUOTE_VOLUME",
         )}}
+
+    def compatible_settings(self, saved):
+        expected = self.settings()
+        if saved == expected:
+            return True
+        # Only the entry-latency adjustment is compatible with existing positions.
+        previous = copy.deepcopy(expected)
+        previous["adaptive_config"]["execution"]["max_latency_ms"] = 200
+        return saved == previous
 
     async def enter(self, symbol, side, price):
         return await self.strategy.CascadeHunter.enter(self, symbol, side, price)

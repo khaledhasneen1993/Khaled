@@ -71,3 +71,36 @@ class AdaptiveAccountTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fill["execution_type"], "GTX")
         self.assertAlmostEqual(fill["price"], 101.99)
         self.assertEqual(self.bot.positions[BTC]["entry"], fill["price"])
+
+    async def test_realistic_rest_delay_still_reaches_ioc_fill(self):
+        import asyncio
+
+        original = self.data.fetch_order_book
+
+        async def delayed_book(*args, **kwargs):
+            await asyncio.sleep(.25)
+            return await original(*args, **kwargs)
+
+        self.data.fetch_order_book = delayed_book
+        self.data.price = 102
+        self.bot.scanner.ingest(event())
+        await self.bot.scanner.evaluate(BTC)
+        self.assertEqual(self.bot.exchange.trades[-1]["execution_type"], "IOC")
+        self.assertIn(BTC, self.bot.positions)
+
+    async def test_prior_latency_settings_resume_but_risk_changes_do_not(self):
+        import json
+
+        self.bot.save()
+        state = json.loads(self.path.read_text())
+        state["settings"]["adaptive_config"]["execution"]["max_latency_ms"] = 200
+        self.path.write_text(json.dumps(state))
+        old_bytes = self.path.read_bytes()
+        restored = V2PaperHunter(self.path, market_data=self.data)
+        self.assertEqual(restored.exchange.balance, self.bot.exchange.balance)
+        self.assertEqual(restored.exchange.trades, self.bot.exchange.trades)
+        self.assertEqual(self.path.read_bytes(), old_bytes)
+        state["settings"]["adaptive_config"]["risk"]["risk_pct_per_trade"] = .1
+        self.path.write_text(json.dumps(state))
+        with self.assertRaises(ValueError):
+            V2PaperHunter(self.path, market_data=self.data)

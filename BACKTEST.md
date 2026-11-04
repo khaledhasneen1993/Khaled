@@ -66,3 +66,18 @@ exit reason. Keep any tuning interval separate from the validation interval.
   price. On a gap through liquidation, the model charges reserved margin and
   exit fee. Funding and venue-specific liquidation tiers are outside the model.
 - New sessions are required when moving from the reference configuration.
+
+## Termux latency correction
+
+A stopped-session diagnostic showed 60 latency rejections and one spread
+rejection, with no fills. Book refresh now requests the order book once and
+uses its midpoint for the price guard. Freshness uses the source timestamp
+when supplied, and otherwise conservatively uses request duration. It ages
+with time after receipt. The paper execution ceiling is 2000 ms, changed
+from 200 ms to accommodate the Termux REST path. Actual request time and
+source-age measurements are journaled with each guard rejection.
+
+Local regression tests verify 250–350 ms REST operation, rejection beyond
+the ceiling, stale source timestamps, and exact compatibility for restoring
+a previous session whose only changed setting is the latency limit.
+Successful device-side execution still needs confirmation after restart.

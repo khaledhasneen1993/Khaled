@@ -131,9 +131,12 @@ class PaperExchange:
 
 
 class PaperState:
+    def compatible_settings(self, saved):
+        return saved == self.settings()
+
     def restore(self):
         state = json.loads(self.state_path.read_text(encoding="utf-8"))
-        if (state["version"] != 1 or state["settings"] != self.settings()
+        if (state["version"] != 1 or not self.compatible_settings(state["settings"])
                 or state["fee_rate"] != self.exchange.fee_rate):
             raise ValueError("State settings differ; use a new --state path or --reset")
         wallet = float(state["balance_usdt"])

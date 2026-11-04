@@ -63,7 +63,7 @@
     "fallback_qty_pct": 0.7,
     "max_spread": 0.0008,
     "max_slippage_bps": 5.0,
-    "max_latency_ms": 200
+    "max_latency_ms": 2000
   },
   "confirm": {
     "confirm_timeout_sec": 2.0,

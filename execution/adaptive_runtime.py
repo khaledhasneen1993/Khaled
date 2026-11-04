@@ -28,11 +28,27 @@ class AdaptiveExecution:
             and now - self.last_loss.get(symbol, -float("inf")) >= self.strategy.SAME_SYMBOL_LOSS_COOLDOWN
         )
 
-    def record_execution(self, signal_id, symbol, reason):
+    def record_execution(self, signal_id, symbol, reason, details=None):
         self.execution_events.append({
-            "signal_id": signal_id, "symbol": symbol, "reason": reason, "timestamp": time.time()
+            "signal_id": signal_id, "symbol": symbol, "reason": reason, "timestamp": time.time(),
+            **({"details": details} if details is not None else {}),
         })
         self.save()
+
+    def record_guard(self, signal_id, symbol, reason, market, order, qty):
+        slippage = market.expected_slippage(qty)
+        details = {
+            "latency_ms": market.latency_ms(),
+            "latency_source": market.latency_source,
+            "book_request_ms": market.request_ms,
+            "max_latency_ms": CONFIG["execution"]["max_latency_ms"],
+            "spread": market.spread(),
+            "slippage_bps": slippage if slippage != float("inf") else None,
+            "price_move_pct": abs(market.price / order["ref_price"] - 1),
+        }
+        self.record_execution(signal_id, symbol, reason, details)
+        log.info("ENTRY REJECT %s %s | latency=%.0fms request=%.0fms spread=%.6f",
+                 symbol, reason, details["latency_ms"], details["book_request_ms"], details["spread"])
 
     def risk_plan(self, side, price, atr, swing, multiplier, entry_slippage=0.0):
         cfg = CONFIG["risk"]
@@ -121,7 +137,7 @@ class AdaptiveExecution:
         order.update(qty=qty, ref_price=signal["price"])
         guard = execution_guard(order, market, cfg)
         if guard:
-            self.record_execution(signal_id, symbol, guard)
+            self.record_guard(signal_id, symbol, guard, market, order, qty)
             return False
 
         opened_ms = time.time() * 1000
@@ -155,7 +171,7 @@ class AdaptiveExecution:
                 return False
             guard = execution_guard({**order, "qty": qty}, market, cfg)
             if guard:
-                self.record_execution(signal_id, symbol, guard)
+                self.record_guard(signal_id, symbol, guard, market, order, qty)
                 return False
             fill_price = market.sweep(qty, order["fallback"]["price"])
             if fill_price is None:
