@@ -11,3 +11,6 @@ dashboard-config*.json
 runtime/
 journal/*.log
 *.lock
+.runtime/
+.venv-dashboard/
+.dashboard.env

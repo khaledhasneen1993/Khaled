@@ -1,4 +1,4 @@
-# Khaled 3.0.1 — approved source baseline and readiness review, 2026-11-04
+# Khaled 3.0.2 — approved source baseline and readiness review, 2026-11-04
 
 **Source-release status: approved current project baseline, as requested by the repository owner. Approval covers the repository source and offline tests. Live acceptance remains pending. `exchange.mode` remains `paper`; no Mainnet approval certificate was created.**
 
@@ -41,7 +41,7 @@ The environment has no configured Binance API credentials or Telegram credential
 ## Verification performed
 
 - `python -m pytest tests/test_live_layers.py -q`: **20/20 passed**.
-- `python -m pytest -q`: **84 passed, 9 subtests passed**.
+- `python -m pytest -q`: **87 passed, 9 subtests passed**.
 - HTTP/stateful exchange fakes exercise signed wire requests, 503 adoption without a second POST, ambiguous absence without resubmission, protective replacement ordering, keeping the old stop after replacement failure, full entry-to-TP flow, native SL adoption, partial-close accounting, failed-protection flattening, persistent latches, and rollout/operator gates.
 - Existing public signatures were compared by AST against the prior commit and preserved. ATR, approximate liquidation, dynamic-stop and trade-journal math modules are byte-identical to the prior commit. Original cascade, orderbook detection, universe selection and scanner signal methods are unchanged.
 - CLI help checks pass. `git diff --check` passes. Pattern-based secret audit finds no probable literal Binance/Telegram keys in tracked contents or reachable history. This is a heuristic audit, not proof of universal historical absence.
@@ -87,3 +87,8 @@ These references were read during implementation. Endpoint compatibility remains
 The previous standalone TP/SL report has been removed because its wallet-sizing/no-time-stop description and 45-test count described an earlier revision. Its useful historical evidence remains in [historical_exit_validation.json](historical_exit_validation.json), with the reproducible checker [validate_exit_history.py](../tools/validate_exit_history.py).
 
 The retained July–September 2026 BTC/ETH candle study checks 529,864 hypothetical initial long/short level calculations on 264,960 candles. It found zero violations of the approximate liquidation bounds, 3% planned risk including fees, or R:R ≥1.5. These are mathematical scenarios at a fixed hypothetical equity, not executed strategy trades or live qualification. They do not establish Sharpe, drawdown, trade counts, or actual broker safety. The raw source hashes and calculation results are kept for audit/regression value, not presented as a separate approved version.
+
+
+## Local comparison launcher correction
+
+Added tools/run_comparison_dashboard.py for the existing Ubuntu setup: Final at /root/cascade-git and Khaled at /root/Khaled. Local loopback UI operation does not require the cloud publisher token. The launcher extracts only pinned UI assets, patches source paths to current checkouts, installs both current dependency sets, creates unique state paths, and verifies 100 USDT/zero positions/zero fills before starting the server. It refuses non-paper modes and does not load historical strategy code. An offline integration check prepared actual Final and Khaled accounts and queried the local UI with worker autostart disabled: both reported balance 100 and zero fills. This check did not connect either bot to market streams. JavaScript syntax validation passed for the updated ATR settings display.

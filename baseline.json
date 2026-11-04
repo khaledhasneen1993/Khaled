@@ -1,6 +1,6 @@
 {
   "name": "Khaled Cascade Hunter",
-  "version": "3.0.1",
+  "version": "3.0.2",
   "status": "approved_source_baseline",
   "python": ">=3.11",
   "primary_entrypoint": "run_bot.py",
@@ -185,5 +185,13 @@
   },
   "approved_on": "2026-11-04",
   "approval_scope": "repository_source_and_offline_tests",
-  "live_acceptance_status": "pending_testnet"
+  "live_acceptance_status": "pending_testnet",
+  "comparison_dashboard": {
+    "host": "127.0.0.1",
+    "port": 8787,
+    "ui_commit": "eb24a32ac04e667f30d33d39f0d23d9efa8eb465",
+    "ui_cache": "runtime/comparison-ui",
+    "venv_dir": "runtime/comparison-venv",
+    "sessions_dir": "runtime/comparison-sessions"
+  }
 }
