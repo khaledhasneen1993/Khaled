@@ -1,10 +1,9 @@
 {
   "name": "Khaled Cascade Hunter",
-  "version": "3.0.0",
-  "status": "offline_tests_only_live_acceptance_pending",
+  "version": "3.0.1",
+  "status": "approved_source_baseline",
   "python": ">=3.11",
   "primary_entrypoint": "run_bot.py",
-  "local_entrypoint": "binance_cascade_hunter_dynamic_v2_paper.py",
   "initial_balance_usdt": 100,
   "position_basis": "current_equity",
   "leverage": 50,
@@ -183,5 +182,8 @@
     "scale_approval_file": "runtime/mainnet_scale_approval.json",
     "scale_factor": 2,
     "max_mainnet_fraction": 1.0
-  }
+  },
+  "approved_on": "2026-11-04",
+  "approval_scope": "repository_source_and_offline_tests",
+  "live_acceptance_status": "pending_testnet"
 }

@@ -1,22 +1,18 @@
 """Fault-path and real adapter HTTP contracts, with no network requests."""
 import asyncio
-import copy
 import hashlib
 import hmac
-import inspect
 import json
 import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
-from urllib.parse import parse_qs, urlencode
+from urllib.parse import urlencode
 
 import httpx
 import pytest
 
 from exchange.live_exchange import LiveExchange
 from exchange.orders import ExchangeError, ExecutionUnknown, safe_create_order
-from exchange.rollout import require_mainnet_readiness
-from infra.rate_limit import TokenBucket
 from risk.config import load_config
 from risk.kill_switch import KillSwitch
 from paper_account import make_position

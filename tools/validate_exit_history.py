@@ -18,7 +18,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from risk.config import load_config
 from risk.atr_levels import compute_atr
-from risk.liq_math import validate_stop_against_liq, max_safe_stop_pct
+from risk.liq_math import validate_stop_against_liq
 from paper_account import make_position
 
 

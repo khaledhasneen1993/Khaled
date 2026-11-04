@@ -12,7 +12,6 @@ from risk.kill_switch import KillSwitch
 from risk.config import load_config
 from risk.exposure_limits import can_open
 from risk.funding import check_funding_before_settlement
-from risk.slippage import entry_slippage_bps, exit_slippage_bps
 from exchange.live_exchange import LiveExchange
 from exchange.reconciler import reconcile
 from exchange.orders import ExchangeError, safe_create_order

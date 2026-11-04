@@ -4,7 +4,6 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import aiohttp
 
 from binance_cascade_hunter_dynamic_v2_paper import V2PaperHunter as DynamicPaperHunter
 from continuous_scanner import CandleGap, ContinuousScanner

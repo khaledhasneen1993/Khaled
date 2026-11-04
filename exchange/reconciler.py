@@ -1,6 +1,5 @@
 """All-account reconciliation; orphan positions outside the scanner are included."""
 from risk.liq_math import direction
-from infra.journal import atomic_json
 
 
 async def reconcile(exchange, state, journal):

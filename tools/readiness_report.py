@@ -10,7 +10,9 @@ from risk.config import load_config
 
 def main():
     cfg = load_config()
-    result = {'selected_mode': cfg['exchange']['mode'], 'mainnet_authorized_by_this_tool': False,
+    result = {'version': cfg['version'], 'source_release_status': cfg['status'],
+              'approval_scope': cfg['approval_scope'], 'live_acceptance_status': cfg['live_acceptance_status'],
+              'selected_mode': cfg['exchange']['mode'], 'mainnet_authorized_by_this_tool': False,
               'config_hash': strategy_fingerprint(cfg), 'code_hash': code_fingerprint(), 'evidence': {}}
     for mode, key in (('testnet', 'evidence_file'), ('mainnet', 'mainnet_evidence_file')):
         path = Path(cfg['rollout'][key])

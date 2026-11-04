@@ -12,13 +12,12 @@ from risk.config import load_config
 from journal.trade_journal import exit_record
 from datetime import datetime, timezone
 import fcntl
-import json
 import time
 import math
 import sys
 from infra.supervisor import SafetySupervisor
 from risk.liq_math import direction
-from risk.slippage import entry_slippage_bps, exit_slippage_bps
+from risk.slippage import exit_slippage_bps
 
 
 class DynamicPaperExchange(PaperExchange):

@@ -1,6 +1,8 @@
-# Khaled 3.0.0 — live-layer readiness, 2026-11-04
+# Khaled 3.0.1 — approved source baseline and readiness review, 2026-11-04
 
-**Status: offline implementation and tests only. `exchange.mode` remains `paper`. No authenticated Testnet session, Telegram message, or Mainnet order was executed. Full acceptance is incomplete.**
+**Source-release status: approved current project baseline, as requested by the repository owner. Approval covers the repository source and offline tests. Live acceptance remains pending. `exchange.mode` remains `paper`; no Mainnet approval certificate was created.**
+
+This revision incorporates the latest 3.0.0 functionality, removes obsolete duplicate TP/SL documentation and unused imports, and consolidates the review here. No signal, sizing, TP/SL, exposure, execution or rollout policy was changed by this cleanup. Runtime filenames and public interfaces are retained for compatibility, not as competing previous bot versions. No authenticated Testnet session, Telegram message, or Mainnet order was executed.
 
 The environment has no configured Binance API credentials or Telegram credentials. No VPS/long-running trial was provisioned. Elapsed Testnet uptime, executed trade counts, observed slippage, Sharpe, drawdown and live exchange protocol acceptance are therefore unavailable, not zero or passed.
 
@@ -78,3 +80,10 @@ The paper model still does not reproduce actual liquidation or funding execution
 - New/query/cancel Algo orders, account-wide orders, position risk, leverage/margin and LIMIT-only modification: https://developers.binance.com/en/docs/catalog/core-trading-derivatives-trading-usd-s-m-futures/api/rest-api/trade
 
 These references were read during implementation. Endpoint compatibility remains subject to actual Testnet verification.
+
+
+## Retained exit-math evidence
+
+The previous standalone TP/SL report has been removed because its wallet-sizing/no-time-stop description and 45-test count described an earlier revision. Its useful historical evidence remains in [historical_exit_validation.json](historical_exit_validation.json), with the reproducible checker [validate_exit_history.py](../tools/validate_exit_history.py).
+
+The retained July–September 2026 BTC/ETH candle study checks 529,864 hypothetical initial long/short level calculations on 264,960 candles. It found zero violations of the approximate liquidation bounds, 3% planned risk including fees, or R:R ≥1.5. These are mathematical scenarios at a fixed hypothetical equity, not executed strategy trades or live qualification. They do not establish Sharpe, drawdown, trade counts, or actual broker safety. The raw source hashes and calculation results are kept for audit/regression value, not presented as a separate approved version.
