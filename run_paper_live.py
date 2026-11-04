@@ -39,7 +39,7 @@ class Publisher:
         return copy.deepcopy({
             "session_id": self.session_id, "status": status,
             "sent_at": datetime.now(timezone.utc).isoformat(),
-            "initial_balance_usdt": 100.0, "settings": bot.settings(),
+            "initial_balance_usdt": bot.initial_balance, "settings": bot.settings(),
             "fee_rate": bot.exchange.fee_rate,
             "balance_usdt": bot.exchange.balance, "equity_usdt": bot.exchange.equity,
             "free_usdt": bot.exchange.free, "used_usdt": bot.exchange.used,
@@ -102,7 +102,7 @@ class CloudPublisher:
         return copy.deepcopy({
             "session_id": self.session_id, "status": status,
             "sent_at": datetime.now(timezone.utc).isoformat(),
-            "initial_balance_usdt": 100.0, "settings": bot.settings(),
+            "initial_balance_usdt": bot.initial_balance, "settings": bot.settings(),
             "fee_rate": bot.exchange.fee_rate,
             "balance_usdt": bot.exchange.balance, "equity_usdt": bot.exchange.equity,
             "free_usdt": bot.exchange.free, "used_usdt": bot.exchange.used,
@@ -192,8 +192,9 @@ def main():
         parser.error("Set CASCADE_DASHBOARD_TOKEN, or use --legacy-dashboard with a valid config")
     if cloud_publisher:
         log.info("COMBINED DASHBOARD TELEMETRY ENABLED | session=%s", session_id)
-    log.info("LIVE V2 PAPER | state=%s | margin=10%% | leverage=50x | ATR TP/SL | max=3", state_path)
-    log.warning("Paper model excludes liquidation, funding and slippage")
+    log.info("KHALED %s | state=%s | equity margin=10%% | leverage=50x | ATR TP/SL | max=3", bot.execution_mode, bot.state_path)
+    if bot.execution_mode == "paper":
+        log.warning("Paper model excludes liquidation and real funding fills")
     try:
         asyncio.run(run(bot, publisher, cloud_publisher))
     except KeyboardInterrupt:

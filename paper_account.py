@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 import binance_cascade_hunter_dynamic_v2 as strategy
 from risk.config import load_config
 from risk.atr_levels import compute_tp_sl
+from risk.slippage import entry_slippage_bps, exit_slippage_bps
+from infra.journal import atomic_json
 
 
 class Position(dict):
@@ -107,7 +109,7 @@ class PaperExchange:
         return self.market_data.amount_to_precision(symbol, amount)
 
     async def fetch_balance(self):
-        return {"USDT": {"free": self.free, "used": self.used, "total": self.balance}}
+        return {"USDT": {"free": self.free, "used": self.used, "total": self.balance, "equity": self.equity}}
 
     async def set_leverage(self, leverage, symbol):
         # Never call a private Binance endpoint.
@@ -157,6 +159,10 @@ class PaperExchange:
             self.positions[symbol] = {
                 "side": side, "entry": price, "amount": amount, "margin": margin,
             }
+        expected = float((params or {}).get("expected_price", price))
+        if not closing:
+            risk_position.update(expected_entry=expected, actual_entry=price,
+                                 entry_slippage_bps=entry_slippage_bps(expected, price, side))
         trade = {
             "id": f"paper-{len(self.trades) + 1}",
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -164,7 +170,14 @@ class PaperExchange:
             "reduceOnly": closing, "fee_usdt": fee, "pnl_usdt": pnl,
             "balance_usdt": self.balance,
         }
+        if closing:
+            trade["signal_id"] = (params or {}).get("signal_id")
+            original_side = "sell" if side == "buy" else "buy"
+            trade.update(expected_exit=expected, actual_exit=price,
+                         exit_slippage_bps=exit_slippage_bps(expected, price, original_side))
         if not closing:
+            trade.update(expected_entry=expected, actual_entry=price,
+                         entry_slippage_bps=risk_position["entry_slippage_bps"])
             trade["signal_id"] = risk_position["signal_id"]
             trade["take_profit_price"] = risk_position["tp"]
             trade["stop_loss_price"] = risk_position["sl"]
@@ -174,6 +187,20 @@ class PaperExchange:
         return {**trade, "average": price, "filled": amount, "status": "closed",
                 **({"risk_position": risk_position} if not closing else {})}
 
+    async def cancel_order(self, symbol, order_id=None, client_id=None):
+        raise ValueError("PaperExchange has no pending exchange orders")
+
+    async def get_position(self, symbol):
+        return [{"symbol": s, "positionAmt": p["amount"] * (1 if p["side"] == "buy" else -1),
+                 "entryPrice": p["entry"]} for s, p in self.positions.items()
+                if symbol is None or symbol == s]
+
+    async def get_open_orders(self, symbol=None):
+        return []
+
+    async def fetch_market(self, symbol):
+        return self.market_data.market(symbol)
+
     async def close(self):
         await self.market_data.close()
 
@@ -182,6 +209,9 @@ class PaperState:
     def restore(self):
         state = json.loads(self.state_path.read_text(encoding="utf-8"))
         saved_settings = dict(state["settings"])
+        saved_settings.setdefault("execution_mode", "paper")
+        if saved_settings.get("position_basis") == "wallet_total":
+            saved_settings["position_basis"] = "current_equity"
         # Discard superseded fixed-exit metadata only; retain strict validation
         # of entry, leverage, sizing, fee and active-exit settings.
         saved_settings.pop("STOP_LOSS_PCT", None)
@@ -197,18 +227,22 @@ class PaperState:
         wallet = float(state["balance_usdt"])
         if not math.isfinite(wallet):
             raise ValueError("Invalid saved wallet")
+        self.initial_balance = state.get("initial_balance_usdt")
         self.exchange.balance = wallet
         self.exchange.positions = state["account_positions"]
         self.exchange.prices = state["prices"]
         self.exchange.trades = state["trades"]
         self.positions = {symbol: Position(pos) for symbol, pos in state["strategy_positions"].items()}
         self.last_trade = state["last_trade"]
+        if state.get("operations") and hasattr(self, "safety"):
+            self.safety.restore(state["operations"])
         if set(self.positions) != set(self.exchange.positions):
             raise ValueError("Inconsistent saved positions")
 
     def save(self):
         state = {
-            "version": 1, "initial_balance_usdt": 100.0,
+            "version": 1, "initial_balance_usdt": getattr(self, "initial_balance", 100.0),
+            **({"operations": self.safety.dump()} if hasattr(self, "safety") else {}),
             "settings": self.settings(), "fee_rate": self.exchange.fee_rate,
             "balance_usdt": self.exchange.balance, "equity_usdt": self.exchange.equity,
             "free_usdt": self.exchange.free, "used_usdt": self.exchange.used,
@@ -216,15 +250,11 @@ class PaperState:
             "strategy_positions": self.positions, "prices": self.exchange.prices,
             "last_trade": self.last_trade, "trades": self.exchange.trades,
         }
-        self.state_path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self.state_path.with_suffix(self.state_path.suffix + ".tmp")
-        temporary.write_text(json.dumps(state, ensure_ascii=False, indent=2, allow_nan=False),
-                             encoding="utf-8")
-        temporary.replace(self.state_path)
+        atomic_json(self.state_path, state)
 
     async def report(self):
         while True:
-            strategy.log.info("PAPER | wallet=%.4f equity=%.4f free=%.4f used=%.4f positions=%d",
-                              self.exchange.balance, self.exchange.equity,
+            strategy.log.info("%s | wallet=%.4f equity=%.4f free=%.4f used=%.4f positions=%d",
+                              getattr(self, "execution_mode", "paper"), self.exchange.balance, self.exchange.equity,
                               self.exchange.free, self.exchange.used, len(self.positions))
             await asyncio.sleep(30)

@@ -72,7 +72,7 @@ class V2Tests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(restored.positions, self.bot.positions)
         self.assertEqual(restored.exchange.positions, self.bot.exchange.positions)
         settings = json.loads(self.path.read_text())["settings"]
-        self.assertEqual(settings["position_basis"], "wallet_total")
+        self.assertEqual(settings["position_basis"], "current_equity")
         self.assertEqual(settings["stop_basis"], "fill_price")
         self.assertEqual(settings["MAX_CONCURRENT_POSITIONS"], 3)
 

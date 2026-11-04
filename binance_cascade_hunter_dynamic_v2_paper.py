@@ -1,4 +1,4 @@
-"""Khaled paper account; local runner without dashboard publishing."""
+"""Compatibility runner for Khaled; execution mode comes from baseline.json."""
 
 import argparse
 import asyncio
@@ -15,7 +15,7 @@ class V2PaperHunter(DynamicPaperHunter):
 
     def settings(self):
         return {**super().settings(), "mode": "dynamic_v2_continuous",
-                "position_basis": "wallet_total", "stop_basis": "fill_price"}
+                "position_basis": "current_equity", "stop_basis": "fill_price"}
 
     async def size_position(self, symbol):
         return await v2.CascadeHunter.size_position(self, symbol)
@@ -45,8 +45,9 @@ def main():
     if not math.isfinite(args.fee_rate) or not 0 <= args.fee_rate < 0.01:
         parser.error("--fee-rate must be finite and in [0, 0.01)")
     bot = V2PaperHunter(args.state, args.fee_rate, args.reset)
-    v2.log.info("V2 PAPER | margin=10%% wallet per trade | leverage=50x | ATR TP/SL | max_positions=3")
-    v2.log.warning("V2 paper account does not model liquidation, funding or slippage")
+    v2.log.info("KHALED %s | equity margin=10%% | leverage=50x | ATR TP/SL | max_positions=3", bot.execution_mode)
+    if bot.execution_mode == "paper":
+        v2.log.warning("Paper mode does not simulate liquidation or actual funding fills")
     try:
         asyncio.run(bot.start())
     except KeyboardInterrupt:

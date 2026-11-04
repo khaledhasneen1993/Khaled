@@ -143,6 +143,8 @@ class ContinuousScanner:
             history.append(row)
         self.event_times[symbol] = event
         self.received[symbol] = self.clock()
+        if hasattr(self.bot, "on_market_heartbeat"):
+            self.bot.on_market_heartbeat()
         self.events += 1
         self.schedule(symbol)
 
@@ -179,6 +181,8 @@ class ContinuousScanner:
         try:
             self.book_checks += 1
             book = await self.bot.exchange.fetch_order_book(symbol, limit=20)
+            if hasattr(self.bot, "on_order_book"):
+                self.bot.on_order_book(symbol, book)
             bids = sum(float(x[1]) for x in book["bids"][:20])
             asks = sum(float(x[1]) for x in book["asks"][:20])
             if not all(math.isfinite(v) and v >= 0 for v in (bids, asks)):
@@ -248,7 +252,9 @@ class ContinuousScanner:
                     if self.changed.is_set():
                         continue
                     streams = "/".join(self.stream_ids[s].lower() + "@kline_1m" for s in warmed)
-                    url = WS_URL + "?" + urlencode({"streams": streams})
+                    mode = getattr(self.bot, "execution_mode", "paper")
+                    ws_url = WS_URL if mode == "paper" else self.bot.cfg["exchange"]["ws_url_" + mode]
+                    url = ws_url + "?" + urlencode({"streams": streams})
                     async with session.ws_connect(url, heartbeat=20, receive_timeout=30) as socket:
                         self.connected = True
                         self.config.log.info("CONTINUOUS WATCH CONNECTED | symbols=%d | entries checked on updates", len(warmed))

@@ -128,9 +128,11 @@ class CascadeHunter:
 
     async def size_position(self, symbol):
         bal = await self.exchange.fetch_balance()
-        usdt = max(0.0, float(bal["USDT"]["total"]))  # wallet balance, not free margin
+        usdt = max(0.0, float(bal["USDT"].get("equity", bal["USDT"]["total"])))  # current equity, not initial capital
         price = (await self.exchange.fetch_ticker(symbol))["last"]
         notional = usdt * MAX_POSITION_PCT * LEVERAGE
+        if getattr(self, "execution_mode", "paper") == "mainnet":
+            notional *= self.exchange.allocation_fraction
         amount = notional / price
         amount = float(self.exchange.amount_to_precision(symbol, amount))
         return amount
@@ -151,7 +153,7 @@ class CascadeHunter:
             await self.set_leverage(symbol)
             fill = await self.exchange.create_order(
                 symbol, "market", side, amount,
-                params={"reduceOnly": False, "exit_atr": atr, "atr_source": atr_source}
+                params={"reduceOnly": False, "exit_atr": atr, "atr_source": atr_source, "expected_price": price}
             )
             self.last_trade[symbol] = now
             self.positions[symbol] = fill["risk_position"]
@@ -189,7 +191,7 @@ class CascadeHunter:
                     pos = self.positions[symbol] = Position(pos)
                 sm = 1 if pos["side"] == "buy" else -1
                 previous_stop = pos.stop
-                fee = self.exchange.fee_rate
+                fee = max(self.exchange.fee_rate, pos.get("entry_fee", 0.) / (pos["entry"] * pos["amount"]))
                 exit_cfg = {**cfg["exit"], "be_offset_pct": max(
                     cfg["exit"]["be_offset_pct"], 2 * fee / (1 - sm * fee))}
                 update_dynamic_stop(pos, SimpleNamespace(price=price, atr=atr), exit_cfg)
@@ -203,20 +205,21 @@ class CascadeHunter:
 
                 if hit_tp or hit_sl:
                     close_side = "sell" if pos["side"] == "buy" else "buy"
-                    await self.exchange.create_order(
-                        symbol, "market", close_side, pos["amount"],
-                        params={"reduceOnly": True}
-                    )
                     reason = "SL" if hit_sl else "TP"
-                    if hasattr(self, "record_exit_reason"):
-                        self.record_exit_reason(symbol, reason, price)
+                    if hasattr(self, "close_position"):
+                        await self.close_position(symbol, reason, price)
+                    else:
+                        await self.exchange.create_order(symbol, "market", close_side, pos["amount"],
+                                                         params={"reduceOnly": True, "expected_price": price})
+                        if hasattr(self, "record_exit_reason"):
+                            self.record_exit_reason(symbol, reason, price)
                     log.info(f"EXIT {reason} {symbol} @ {price:.4f}")
                     to_remove.append(symbol)
             except Exception as e:
                 log.error(f"Exit check failed {symbol}: {e}")
 
         for s in to_remove:
-            del self.positions[s]
+            self.positions.pop(s, None)
 
 
     async def exit_watcher(self):

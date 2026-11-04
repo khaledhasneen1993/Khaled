@@ -1,13 +1,12 @@
 {
   "name": "Khaled Cascade Hunter",
-  "version": "2.1.0",
-  "status": "implementation_verified_performance_pending",
+  "version": "3.0.0",
+  "status": "offline_tests_only_live_acceptance_pending",
   "python": ">=3.11",
-  "primary_entrypoint": "binance_cascade_hunter_dynamic_v2_paper.py",
+  "primary_entrypoint": "run_bot.py",
   "local_entrypoint": "binance_cascade_hunter_dynamic_v2_paper.py",
-  "mode": "paper_only",
   "initial_balance_usdt": 100,
-  "position_basis": "wallet_total",
+  "position_basis": "current_equity",
   "leverage": 50,
   "margin_fraction_per_position": 0.1,
   "max_concurrent_positions": 3,
@@ -45,5 +44,144 @@
     "bot_id": "khaled",
     "url": "https://coamowlsyuqbxngijxsu.supabase.co/functions/v1/cascade-dashboard",
     "upload_sec": 10
+  },
+  "exchange": {
+    "mode": "paper",
+    "base_url_testnet": "https://demo-fapi.binance.com",
+    "base_url_mainnet": "https://fapi.binance.com",
+    "ws_url_testnet": "wss://demo-fstream.binance.com/market/stream",
+    "ws_url_mainnet": "wss://fstream.binance.com/market/stream",
+    "http_timeout_sec": 10,
+    "recv_window_ms": 5000,
+    "rate_per_sec": 5,
+    "rate_burst": 10,
+    "max_retries": 5,
+    "backoff_base": 2.0,
+    "backoff_jitter_sec": 1.0,
+    "max_backoff_sec": 120,
+    "order_attempts": 3,
+    "order_poll_attempts": 3,
+    "order_poll_sec": 1,
+    "time_sync_interval_sec": 60,
+    "client_id_prefix": "kh_",
+    "working_type": "CONTRACT_PRICE",
+    "state_dir": "runtime",
+    "credentials_rotation_days": 90,
+    "http_weights": {
+      "default": 1,
+      "/fapi/v3/account": 5,
+      "/fapi/v3/positionRisk": 5,
+      "/fapi/v1/openOrders": 40,
+      "/fapi/v1/ticker/24hr": 40,
+      "/fapi/v1/exchangeInfo": 1,
+      "/fapi/v1/klines": 2,
+      "/fapi/v1/depth": 2
+    },
+    "weight_per_minute": 1800,
+    "orders_per_10sec": 200,
+    "orders_per_minute": 1000,
+    "state_filename": "state.json",
+    "trade_page_limit": 1000,
+    "fill_qty_tolerance_pct": 1e-08,
+    "non_incident_error_codes": [
+      -4046,
+      -2011,
+      -2013
+    ],
+    "account_refresh_sec": 5
+  },
+  "kill_switch": {
+    "daily_dd_limit_pct": 0.05,
+    "max_consecutive_losses": 4,
+    "ws_timeout_sec": 30,
+    "api_error_limit": 5,
+    "spread_spike_mult": 5.0,
+    "api_window_sec": 60,
+    "api_warning_count": 3,
+    "ws_warning_sec": 10,
+    "monitor_interval_sec": 1,
+    "spread_window": 50,
+    "spread_warmup": 5,
+    "flatten_attempts": 3,
+    "flatten_retry_sec": 2,
+    "spread_poll_sec": 5,
+    "book_depth": 20
+  },
+  "exposure": {
+    "basis": "margin",
+    "max_concurrent": 3,
+    "max_long_exposure_pct": 0.3,
+    "max_short_exposure_pct": 0.3,
+    "max_gross_exposure_pct": 0.5,
+    "max_correlated_same_direction": 2,
+    "leverage": 50,
+    "correlated_groups": [
+      [
+        "BTCUSDT",
+        "ETHUSDT",
+        "SOLUSDT",
+        "BNBUSDT"
+      ],
+      [
+        "DOGEUSDT",
+        "SHIBUSDT",
+        "PEPEUSDT"
+      ]
+    ]
+  },
+  "funding": {
+    "warning_minutes": 5,
+    "close_threshold": 0.0005,
+    "poll_sec": 60
+  },
+  "slippage": {
+    "alert_bps": 5.0,
+    "window": 50
+  },
+  "alerts": {
+    "telegram_enabled": true,
+    "daily_report_hour_utc": 0,
+    "base_url": "https://api.telegram.org",
+    "http_timeout_sec": 5,
+    "queue_size": 1000,
+    "max_attempts": 3,
+    "retry_sec": 2,
+    "shutdown_timeout_sec": 30,
+    "message_max_chars": 3500
+  },
+  "time_stop": {
+    "enabled": true,
+    "minutes": 45,
+    "min_profit_pct": 0.002
+  },
+  "recon": {
+    "interval_sec": 60,
+    "auto_close_orphans": true,
+    "size_tolerance_pct": 0.01,
+    "entry_tolerance_pct": 1e-06
+  },
+  "rollout": {
+    "testnet_days_required": 14,
+    "continuous_days_required": 7,
+    "min_closed_trades": 100,
+    "max_mean_entry_slippage_bps": 5,
+    "min_sharpe": 0.8,
+    "max_drawdown_pct": 0.15,
+    "max_stuck_fraction": 0.1,
+    "stuck_minutes": 60,
+    "initial_mainnet_fraction": 0.01,
+    "scale_review_days": 14,
+    "evidence_file": "runtime/testnet_evidence.json",
+    "approval_file": "runtime/mainnet_approval.json",
+    "max_monitor_gap_sec": 120,
+    "equity_sample_sec": 60,
+    "sharpe_periods_per_year": 525600,
+    "sharpe_window": 100,
+    "operator_policy_file": "runtime/{mode}/operator_policy.json",
+    "mainnet_evidence_file": "runtime/mainnet_evidence.json",
+    "scale_state_file": "runtime/mainnet_scale_state.json",
+    "scale_approval_file": "runtime/mainnet_scale_approval.json",
+    "scale_factor": 2,
+    "max_mainnet_fraction": 1.0
   }
 }
