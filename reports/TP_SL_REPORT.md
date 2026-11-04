@@ -8,7 +8,7 @@ Only Khaled is modified. Source baseline: Final commit `d200a07ba26592fadfb5ce1d
 
 ATR-based entry TP/SL, approximate isolated-margin liquidation bounds, account-risk stop clipping, breakeven, monotone trailing, persistent position metadata, and complete closure journal in `trades[].exit_detail`. Entry detection, volume spike, top-20 orderbook filter, scanner, cooldown, wallet-based sizing, 50× leverage and three-position limit are preserved. Existing public method signatures are unchanged; an AST comparison confirmed original detection, book, sizing and watcher methods, and a byte comparison confirmed `continuous_scanner.py` is unchanged.
 
-All new configurable parameters come from `baseline.json`. The original baseline fields and constants are retained for compatibility; the active exit configuration is additionally included in persisted settings. Existing dictionaries remain JSON dictionaries; `Position` adds attribute access for stop management. Existing outer trade reasons remain `TP/SL`; the detailed journal uses the required `take_profit/stop_loss` and adds `exit_attribution` for breakeven/trailing.
+Configurable parameters come from `baseline.json`. The 2.1.0 cleanup removed superseded fixed TP/SL constants and baseline fields. New persisted settings contain the active exit configuration and use `fill_price` as the stop basis; the restore path normalizes superseded metadata for compatibility. Existing dictionaries remain JSON dictionaries; `Position` adds attribute access for stop management. Existing outer trade reasons remain `TP/SL`; the detailed journal uses the required `take_profit/stop_loss` and adds `exit_attribution` for breakeven/trailing.
 
 ## Necessary resolutions of conflicting requirements
 
@@ -29,7 +29,7 @@ python run_paper_live.py --help
 git diff --check
 ```
 
-Results: **13/13 required TP/SL tests passed; 44 total tests and 11 unittest subtests passed.** Integration coverage includes both sides, actual fill anchoring, both entry/exit fees in planned account risk, ATR outage without rejecting entries, resume of armed stops, journal persistence, legacy-state upgrade, unchanged three-position sizing, and honest gap-fill loss reporting. The randomized required test covers 500 entry/ATR scenarios on each side across the five requested leverages.
+Results: **13/13 required TP/SL tests passed; 45 total tests and 9 unittest subtests passed.** Integration coverage includes both sides, actual fill anchoring, both entry/exit fees in planned account risk, ATR outage without rejecting entries, resume of armed stops, journal persistence, legacy-state upgrade, unchanged three-position sizing, and honest gap-fill loss reporting. The randomized required test covers 500 entry/ATR scenarios on each side across the five requested leverages.
 
 ## Historical data verification (not a strategy backtest)
 
@@ -74,4 +74,4 @@ python tools/validate_exit_history.py --data-dir /path/to/archives --months 2026
 
 ## Model limits
 
-The requested liquidation formula is an approximation with a configurable fixed MMR, not a reproduction of Binance risk tiers. Binance liquidation is triggered by Mark Price and depends on margin requirements: https://www.binance.com/en/support/faq/detail/360033525271 . This paper model still does not simulate liquidation events, funding or exchange-native stops. Exit checks remain on the existing schedule; no bound on gap losses is guaranteed. Inherited dashboard identity/configuration was deliberately left outside this TP/SL update.
+The requested liquidation formula is an approximation with a configurable fixed MMR, not a reproduction of Binance risk tiers. Binance liquidation is triggered by Mark Price and depends on margin requirements: https://www.binance.com/en/support/faq/detail/360033525271 . This paper model still does not simulate liquidation events, funding or exchange-native stops. Exit checks remain on the existing schedule; no bound on gap losses is guaranteed. The subsequent repository cleanup sets the publisher identity to `khaled` and reads its URL/interval from baseline. No publisher was started; server credentials and acceptance have not been verified.

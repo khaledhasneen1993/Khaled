@@ -1,4 +1,4 @@
-"""Virtual account and persistent state for the approved V2 simulation."""
+"""Virtual account and persistent state for the Khaled paper simulation."""
 
 import asyncio
 import json
@@ -182,6 +182,12 @@ class PaperState:
     def restore(self):
         state = json.loads(self.state_path.read_text(encoding="utf-8"))
         saved_settings = dict(state["settings"])
+        # Discard superseded fixed-exit metadata only; retain strict validation
+        # of entry, leverage, sizing, fee and active-exit settings.
+        saved_settings.pop("STOP_LOSS_PCT", None)
+        saved_settings.pop("TAKE_PROFIT_PCT", None)
+        if saved_settings.get("stop_basis") == "signal_price":
+            saved_settings["stop_basis"] = "fill_price"
         # Pre-feature states have no exit-config snapshot. Existing settings
         # must still match, while positions are upgraded on their next check.
         saved_settings.setdefault("active_exit", self.settings()["active_exit"])

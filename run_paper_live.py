@@ -1,4 +1,4 @@
-"""Run approved V2 paper trading and send snapshots to its private dashboard."""
+"""Run Khaled paper trading with optional dashboard publishing."""
 import argparse
 import asyncio
 import copy
@@ -12,6 +12,7 @@ from uuid import uuid4
 
 import aiohttp
 from binance_cascade_hunter_dynamic_v2_paper import V2PaperHunter
+from risk.config import load_config
 
 log = logging.getLogger("CASCADE")
 
@@ -91,7 +92,7 @@ class Publisher:
 
 class CloudPublisher:
     """Telemetry-only publisher for the combined private dashboard."""
-    URL = "https://coamowlsyuqbxngijxsu.supabase.co/functions/v1/cascade-dashboard"
+    URL = load_config()["dashboard"]["url"]
 
     def __init__(self, bot, session_id, token):
         self.bot, self.session_id, self.token = bot, session_id, token
@@ -116,18 +117,19 @@ class CloudPublisher:
     async def upload(self, session, status="running"):
         async with session.post(
             self.URL, json=self.snapshot(status),
-            headers={"x-bot-id": "final", "x-bot-token": self.token},
+            headers={"x-bot-id": self.bot.cfg["dashboard"]["bot_id"], "x-bot-token": self.token},
         ) as response:
             if response.status != 200 or (await response.json()).get("ok") is not True:
                 raise RuntimeError("Combined dashboard rejected snapshot")
 
     async def loop(self):
-        delay = 10
+        interval = self.bot.cfg["dashboard"]["upload_sec"]
+        delay = interval
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=8)) as session:
             while True:
                 try:
                     await self.upload(session)
-                    delay = 10
+                    delay = interval
                 except (aiohttp.ClientError, asyncio.TimeoutError, RuntimeError, ValueError):
                     log.warning("COMBINED DASHBOARD UPDATE FAILED | trading continues")
                     delay = min(30, delay * 2)

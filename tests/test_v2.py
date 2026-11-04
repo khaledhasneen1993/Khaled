@@ -73,7 +73,7 @@ class V2Tests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(restored.exchange.positions, self.bot.exchange.positions)
         settings = json.loads(self.path.read_text())["settings"]
         self.assertEqual(settings["position_basis"], "wallet_total")
-        self.assertEqual(settings["stop_basis"], "signal_price")
+        self.assertEqual(settings["stop_basis"], "fill_price")
         self.assertEqual(settings["MAX_CONCURRENT_POSITIONS"], 3)
 
     async def test_continuous_scanner_uses_v2_limit_of_three(self):

@@ -1,4 +1,4 @@
-"""Approved V2 account; optional local runner without dashboard publishing."""
+"""Khaled paper account; local runner without dashboard publishing."""
 
 import argparse
 import asyncio
@@ -15,7 +15,7 @@ class V2PaperHunter(DynamicPaperHunter):
 
     def settings(self):
         return {**super().settings(), "mode": "dynamic_v2_continuous",
-                "position_basis": "wallet_total", "stop_basis": "signal_price"}
+                "position_basis": "wallet_total", "stop_basis": "fill_price"}
 
     async def size_position(self, symbol):
         return await v2.CascadeHunter.size_position(self, symbol)

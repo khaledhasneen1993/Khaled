@@ -1,4 +1,4 @@
-"""Continuous paper runtime for the approved V2 strategy."""
+"""Continuous paper runtime for Khaled with adaptive exits."""
 
 import asyncio
 from pathlib import Path
@@ -41,7 +41,7 @@ class DynamicPaperHunter(dynamic.CascadeHunter, PaperState):
         return {"mode": "dynamic_scan", "active_exit": {key: self.cfg[key] for key in ("tp_sl", "atr", "exit")},
                 **{name: getattr(self.strategy, name) for name in (
             "LEVERAGE", "MAX_POSITION_PCT", "CASCADE_THRESHOLD", "VOLUME_SPIKE",
-            "TAKE_PROFIT_PCT", "STOP_LOSS_PCT", "COOLDOWN_SEC", "SCAN_INTERVAL",
+            "COOLDOWN_SEC", "SCAN_INTERVAL",
             "MAX_SYMBOLS_TO_SCAN", "MAX_CONCURRENT_POSITIONS", "MIN_QUOTE_VOLUME",
         )}}
 

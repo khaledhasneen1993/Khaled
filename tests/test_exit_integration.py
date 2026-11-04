@@ -110,6 +110,9 @@ def test_legacy_state_upgrades_without_changing_account_or_size(tmp_path):
         assert await bot.enter('BTC/USDT:USDT', 'buy', 100)
         state = json.loads(path.read_text())
         state['settings'].pop('active_exit')
+        state['settings']['STOP_LOSS_PCT'] = .15
+        state['settings']['TAKE_PROFIT_PCT'] = .018
+        state['settings']['stop_basis'] = 'signal_price'
         old = state['strategy_positions']['BTC/USDT:USDT']
         state['strategy_positions']['BTC/USDT:USDT'] = {k: old[k] for k in ('side', 'entry', 'amount', 'tp')}
         state['strategy_positions']['BTC/USDT:USDT']['sl'] = 85

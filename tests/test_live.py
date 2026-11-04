@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 from binance_cascade_hunter_dynamic_v2_paper import V2PaperHunter
-from run_paper_live import Publisher, read_config, run
+from run_paper_live import Publisher, CloudPublisher, read_config, run
 from test_continuous import StreamData, NOW, event
 from continuous_scanner import ContinuousScanner
 
@@ -88,3 +88,20 @@ class LiveTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(ValueError):read_config(p)
         p.write_text(json.dumps(self.publisher.config))
         self.assertEqual(read_config(p),self.publisher.config)
+
+    async def test_cloud_publisher_uses_khaled_identity(self):
+        captured = {}
+        class Response:
+            status = 200
+            async def __aenter__(self): return self
+            async def __aexit__(self, *args): pass
+            async def json(self): return {'ok': True}
+        class Session:
+            def post(self, url, **kwargs):
+                captured.update(url=url, **kwargs)
+                return Response()
+        publisher = CloudPublisher(self.bot, 'test-khaled', 'test-only')
+        await publisher.upload(Session())
+        self.assertEqual(captured['headers']['x-bot-id'], 'khaled')
+        self.assertEqual(captured['url'], self.bot.cfg['dashboard']['url'])
+        self.assertNotIn('test-only', json.dumps(captured['json']))
