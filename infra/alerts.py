@@ -3,12 +3,12 @@ import logging
 import os
 import httpx
 
-logging.getLogger('httpx').setLevel(logging.WARNING)
-logging.getLogger('httpcore').setLevel(logging.WARNING)
+from infra.http_logging import secure_http_logging
 
 
 class TelegramAlerter:
     def __init__(self, cfg):
+        secure_http_logging()
         self.cfg = cfg
         self.token = os.getenv('TELEGRAM_BOT_TOKEN', '')
         self.chat_id = os.getenv('TELEGRAM_CHAT_ID', '')

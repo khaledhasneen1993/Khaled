@@ -22,6 +22,7 @@ import httpx
 
 from paper_account import PaperExchange, make_position
 from infra.journal import OperationalJournal, atomic_json
+from infra.http_logging import secure_http_logging
 from infra.rate_limit import TokenBucket, with_backoff
 from risk.slippage import entry_slippage_bps, exit_slippage_bps
 from .orders import ExchangeError, ExecutionUnknown, safe_create_order
@@ -65,6 +66,7 @@ class LiveExchange(DurableExecution, PaperExchange):
             self.allocation_fraction = mainnet_allocation_fraction(cfg)
         self._secret = secret
         ec = cfg['exchange']
+        secure_http_logging()
         self.client = httpx.AsyncClient(base_url=ec['base_url_' + self.mode],
             headers={'X-MBX-APIKEY': key}, timeout=ec['http_timeout_sec'], follow_redirects=False)
         self.rl = rate_limiter
