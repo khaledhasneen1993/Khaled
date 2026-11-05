@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from infra.alerts import TelegramAlerter
+from infra.errors import diagnostic_fields
 from infra.journal import OperationalJournal, atomic_json
 from risk.kill_switch import KillSwitch
 from risk.exposure_limits import can_open
@@ -258,32 +259,44 @@ class SafetySupervisor:
         while True:
             async with self.bot.lock:
                 now = time.time()
+                stage, diagnostic_symbol = 'account_refresh', None
                 try:
                     if self.live and now - self.last_account >= self.cfg['exchange']['account_refresh_sec']:
                         await self.bot.exchange.refresh_account()
                         self.last_account = now
+                    stage = 'storage_health'
                     if self.live and (self.storage_failed or self.journal.failed or self.bot.exchange.journal.failed):
                         await self.trip('storage_failure')
+                    stage = 'alert_health'
                     if self.alerter.failed and self.live:
                         await self.trip('alerts_unavailable')
+                    stage = 'execution_fault_handling'
                     if getattr(self.bot.exchange, 'execution_fault', None):
                         await self.trip(self.bot.exchange.execution_fault)
+                    stage = 'spread_check'
                     if self.live and now - self.last_spread >= self.cfg['kill_switch']['spread_poll_sec']:
                         for symbol in list(self.bot.positions):
+                            diagnostic_symbol = symbol
                             book = await self.bot.exchange.fetch_order_book(symbol, self.cfg['kill_switch']['book_depth'])
                             self.observe_book(symbol, book)
                             self.kill.check(self.bot.exchange, self.latest.get(symbol))
                         self.last_spread = now
+                    stage, diagnostic_symbol = 'kill_evaluation', None
                     reason = self.kill.check(self.bot.exchange, None)
                     if reason:
+                        stage = 'kill_actions'
                         await self.trip(reason)
                     elif self.live and now - self.last_recon >= self.cfg['recon']['interval_sec']:
+                        stage = 'reconciliation_account_refresh'
                         await self.bot.exchange.refresh_account()
+                        stage = 'reconciliation'
                         await self.reconcile_once()
                         self.last_recon = now
+                    stage = 'funding_check'
                     if not self.kill.triggered and self.live and now - self.last_funding >= self.cfg['funding']['poll_sec']:
                         await check_funding_before_settlement(self.bot, self.bot.exchange, self.cfg['funding'], self.journal)
                         self.last_funding = now
+                    stage = 'health_warnings'
                     if self.kill.state.api_errors_1m >= self.cfg['kill_switch']['api_warning_count'] and 'api' not in self.warned:
                         self.warned.add('api')
                         await self.event('api_errors_warning', 'warning', count=self.kill.state.api_errors_1m)
@@ -294,18 +307,25 @@ class SafetySupervisor:
                         self.warned.add('ws')
                         await self.event('ws_disconnected', 'warning')
                     if age <= self.cfg['kill_switch']['ws_warning_sec']: self.warned.discard('ws')
+                    stage = 'daily_boundary'
                     utc = datetime.now(timezone.utc)
                     day = utc.date().isoformat()
                     if day != self.kill.day and not self.kill.triggered:
                         self.kill.reset_daily()
                     if utc.hour == self.cfg['alerts']['daily_report_hour_utc'] and self.last_report_day != day:
+                        stage = 'daily_report'
                         await self.daily_report()
                         self.last_report_day = day
                     if self.evidence and not self.kill.triggered and now - self.last_evidence >= self.cfg['rollout']['equity_sample_sec']:
+                        stage = 'evidence_sample'
                         self.evidence.sample(self.bot.exchange.equity, self.bot.exchange.trades, self.bot.positions)
                         self.last_evidence = now
+                    stage = 'state_save'
                     self.bot.save()
-                except Exception:
+                except Exception as error:
+                    self.ready = False
+                    await self.event('monitor_exception', 'critical', stage=stage,
+                        symbol=diagnostic_symbol, recovery_action='latch_and_reconcile', **diagnostic_fields(error))
                     self.kill.on_api_error()
                     await self.trip('monitor_failure')
             await asyncio.sleep(self.cfg['kill_switch']['monitor_interval_sec'])

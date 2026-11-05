@@ -167,9 +167,11 @@ class LiveExchange(DurableExecution, PaperExchange):
             values = self._sign(params or {}) if signed else (params or {})
             try:
                 response = await self.client.request(method, path, params=values)
-            except httpx.TransportError:
+            except httpx.TransportError as error:
                 if self.on_api_error: self.on_api_error()
-                raise ExchangeError() from None
+                sanitized = ExchangeError()
+                sanitized.transport_error_type = type(error).__name__
+                raise sanitized from None
             try:
                 data = response.json()
             except ValueError:

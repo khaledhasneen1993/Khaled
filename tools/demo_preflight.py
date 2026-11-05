@@ -9,6 +9,7 @@ from risk.config import load_config, execution_mode
 from exchange.demo import validate_demo
 from exchange.live_exchange import LiveExchange
 from infra.rate_limit import TokenBucket
+from infra.errors import diagnostic_fields
 
 
 class ReadOnlyDemo(LiveExchange):
@@ -91,8 +92,7 @@ def main():
         finally: await exchange.close()
     try: asyncio.run(run())
     except Exception as error:
-        print(json.dumps({'stage': 'preflight', 'error_type': type(error).__name__,
-            'http_status': getattr(error, 'status', 0), 'exchange_error_code': getattr(error, 'code', 0)}))
+        print(json.dumps({'stage': 'preflight', **diagnostic_fields(error)}))
         raise SystemExit(1) from None
 
 
