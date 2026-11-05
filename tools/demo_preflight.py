@@ -28,7 +28,12 @@ def demo_config():
 async def preflight(exchange, symbol, websocket=True):
     await exchange.load_markets()
     symbol = exchange.symbol(symbol)
-    account = await exchange.refresh_account()
+    await exchange.refresh_account()
+    account_config = await exchange._request('GET', '/fapi/v1/accountConfig', retry=True)
+    # V3 balances omit canTrade. This is account enablement, not proof of
+    # the API key's TRADE permission or native order acceptance.
+    can_trade = account_config.get('canTrade')
+    if type(can_trade) is not bool: can_trade = None
     orders = await exchange.get_open_orders()
     ticker = await exchange.fetch_ticker(symbol)
     choice = await exchange.select_leverage(symbol, exchange.equity * exchange.cfg['margin_fraction_per_position'], ticker['last'], confirm=False)
@@ -60,14 +65,15 @@ async def preflight(exchange, symbol, websocket=True):
     return {'session_guard_active': bool(guard.get('active')), 'storage_failed': storage_failed,
         'unresolved_intents': unresolved, 'pending_accounting': pending_accounting, 'local_kill_latch': kill, 'mode': 'demo', 'equity_usdt': exchange.equity, 'available_usdt': exchange.free,
         'positions': len(exchange.positions), 'regular_orders': sum(not o.get('is_algo') for o in orders),
-        'algo_orders': sum(bool(o.get('is_algo')) for o in orders), 'account_can_trade': account.get('canTrade'),
+        'algo_orders': sum(bool(o.get('is_algo')) for o in orders), 'account_can_trade': can_trade,
+        'account_can_trade_source': '/fapi/v1/accountConfig',
         'symbol': symbol, 'candidate': choice, 'current_symbol_configuration': config,
         'websocket_market_data_verified': ws_ok, 'signature_and_account_reads_verified': True,
         'order_submission_verified': False, 'protection_acceptance_verified': False,
         'apiRestrictions': 'not used; Demo 404 cannot establish permissions',
         'local_pending_intents': sum(i['status'] == 'pending' for i in exchange.intents.values()),
         'requires_operator_review': bool(exchange.positions or orders or kill or guard.get('active') or storage_failed or unresolved or pending_accounting
-                                         or account.get('canTrade') is not True or websocket and not ws_ok)}
+                                         or can_trade is not True or websocket and not ws_ok)}
 
 
 def main():

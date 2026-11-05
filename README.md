@@ -1,4 +1,4 @@
-# Khaled 3.1.1 — Binance USDT-M Futures Demo
+# Khaled 3.1.2 — Binance USDT-M Futures Demo
 
 نسخة المصدر المصححة على `main`، بعد مراجعة 3.1.0 وإصلاح عيوبها المثبتة. **مسار التشغيل المعتمد هنا هو Demo فقط: `run_demo.py`.** يرفض Mainnet والعناوين غير المعتمدة. لم يُعدّل مستودع Final، ولم يُشغّل تداول أثناء التطوير.
 
@@ -15,8 +15,8 @@ apt update
 apt install -y git python3 python3-venv
 mkdir -p ~/khaled-installations
 cd ~/khaled-installations
-git clone --branch main --single-branch https://github.com/khaledhasneen1993/Khaled.git Khaled-3.1.1
-cd Khaled-3.1.1
+git clone --branch main --single-branch https://github.com/khaledhasneen1993/Khaled.git Khaled-3.1.2
+cd Khaled-3.1.2
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
@@ -70,6 +70,8 @@ python tools/demo_preflight.py
 ```
 
 الفحص يستخدم **GET فقط** واشتراك بيانات سوق WebSocket؛ لا يضبط رافعة ولا يرسل أمرًا ولا رسالة Telegram. يفحص الاتصال والتوقيع والرصيد الحالي ووضع الحساب وقراءة المراكز والأوامر العادية وAlgo والتنفيذات، ويعرض أعلى رافعة مرشحة للرمز والحجم. يمكن اختيار رمز آخر عبر `--symbol HUMAUSDT`.
+
+يقرأ الفحص `account_can_trade` من `GET /fapi/v1/accountConfig`؛ استجابة رصيد V3 لا توفر هذه القيمة. غيابها أو رجوع `false` يبقي طلب المراجعة قائمًا.
 
 نجاح القراءة لا يثبت صلاحية TRADE أو قبول الرافعة أو SL/TP؛ هذه الحدود تظهر صراحة في النتيجة. لا نستخدم `/sapi/v1/account/apiRestrictions` لإثبات الصلاحيات؛ نتيجة 404 على Demo ليست إثباتًا ولا استثناءً لـMainnet. إذا ظهرت مراكز/أوامر أو Kill Switch أو جلسة غير مراجعة أو نيات/محاسبة معلقة، راجعها قبل البدء؛ نتيجة «صفر» التاريخية لا تصف الحساب الآن. رمز خروج الفحص `2` يعني أن هناك ما يحتاج مراجعة؛ `1` يعني خطأ اتصال/فحص؛ `0` يعني اجتياز القراءات فقط.
 
@@ -145,7 +147,7 @@ python -m pytest -q
 python tools/audit_secrets.py
 ```
 
-آخر نتيجة موثقة على Linux وPython 3.12، باستخدام HTTP Mock ودون حساب Binance: **143 اختبارًا و9 اختبارات فرعية**. كل الاختبارات تستخدم محاكاة دون مفاتيح حقيقية؛ لم يُنفّذ اختبار حساب Demo أو اختبار جهاز Android/PRoot فعلي. اتصالات الشبكة محظورة داخل الاختبارات، وإعداد Paper معزول دون تعديل baseline على القرص.
+آخر نتيجة موثقة على Linux وPython 3.12، باستخدام HTTP Mock ودون حساب Binance: **148 اختبارًا و9 اختبارات فرعية**. كل الاختبارات تستخدم محاكاة دون مفاتيح حقيقية؛ لم يُنفّذ اختبار حساب Demo أو اختبار جهاز Android/PRoot فعلي. اتصالات الشبكة محظورة داخل الاختبارات، وإعداد Paper معزول دون تعديل baseline على القرص.
 
 ## عقود Binance الرسمية التي روجعت
 

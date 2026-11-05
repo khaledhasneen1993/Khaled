@@ -480,7 +480,11 @@ def test_nonterminal_partial_is_confirmed_cancelled_before_residual_close(live, 
     run(check())
 
 
-def test_preflight_only_reads_account_and_capabilities(live, tmp_path):
+@pytest.mark.parametrize('account_configuration,needs_review', [
+    ({'canTrade': True}, False), ({'canTrade': False}, True), ({}, True),
+    ({'canTrade': None}, True), ({'canTrade': 'true'}, True), ({'canTrade': 1}, True),
+])
+def test_preflight_only_reads_account_and_capabilities(live, tmp_path, account_configuration, needs_review):
     from tools.demo_preflight import preflight
     seen = []
     server = SimulatedBinance()
@@ -495,6 +499,7 @@ def test_preflight_only_reads_account_and_capabilities(live, tmp_path):
                             {'filterType': 'PRICE_FILTER', 'tickSize': '.01'}, {'filterType': 'MIN_NOTIONAL', 'notional': '5'}]}]})
         if path == '/fapi/v1/positionSide/dual': return httpx.Response(200, json={'dualSidePosition': False})
         if path == '/fapi/v1/multiAssetsMargin': return httpx.Response(200, json={'multiAssetsMargin': False})
+        if path == '/fapi/v1/accountConfig': return httpx.Response(200, json=account_configuration)
         if path == '/fapi/v1/symbolConfig': return httpx.Response(200, json=[{'symbol': 'BTCUSDT', 'leverage': 10}])
         if path == '/fapi/v1/userTrades': return httpx.Response(200, json=[])
         return await server(request)
@@ -505,6 +510,10 @@ def test_preflight_only_reads_account_and_capabilities(live, tmp_path):
         assert report['equity_usdt'] == 100 and report['signature_and_account_reads_verified']
         assert not report['order_submission_verified'] and not report['protection_acceptance_verified']
         assert not report['candidate']['confirmed']
+        expected = account_configuration.get('canTrade')
+        assert report['account_can_trade'] is (expected if type(expected) is bool else None)
+        assert report['requires_operator_review'] is needs_review
+        assert report['account_can_trade_source'] == '/fapi/v1/accountConfig'
         assert set(seen) == {'GET'} and not server.orders
         await live.close()
     run(check())

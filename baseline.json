@@ -1,6 +1,6 @@
 {
   "name": "Khaled Cascade Hunter",
-  "version": "3.1.1",
+  "version": "3.1.2",
   "status": "approved_source_baseline",
   "python": ">=3.11",
   "primary_entrypoint": "run_bot.py",
@@ -76,7 +76,8 @@
       "/fapi/v1/klines": 2,
       "/fapi/v1/depth": 2,
       "/fapi/v1/openAlgoOrders": 40,
-      "/fapi/v1/userTrades": 5
+      "/fapi/v1/userTrades": 5,
+      "/fapi/v1/accountConfig": 5
     },
     "weight_per_minute": 1800,
     "orders_per_10sec": 200,
