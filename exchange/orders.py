@@ -18,6 +18,10 @@ class ExecutionUnknown(ExchangeError):
     pass
 
 
+class FillPriceUnavailable(ExecutionUnknown):
+    """Filled quantity is known; its actual average price is still unavailable."""
+
+
 async def safe_create_order(exchange, order_params, journal):
     params = dict(order_params)
     # A pending or observed-but-unsettled POST is never permission to send again.

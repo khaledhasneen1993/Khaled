@@ -148,6 +148,21 @@ class LiveExchange(DurableExecution, PaperExchange):
         if (not isinstance(result, dict) or not str(result.get(identity, '')).isdigit()
                 or int(result[identity]) <= 0 or result.get(client_key) != client_id):
             raise ExecutionUnknown()
+        # Preserve safe order facts at each change. A later successful query must
+        # not erase the first response needed to investigate an incident.
+        keys = ('orderId', 'clientOrderId', 'algoId', 'clientAlgoId', 'symbol', 'side',
+                'status', 'algoStatus', 'type', 'orderType', 'origQty', 'executedQty',
+                'cumQuote', 'avgPrice', 'reduceOnly', 'quantity', 'triggerPrice',
+                'actualOrderId', 'time', 'updateTime', 'createTime')
+        def snapshot(value): return {k: value[k] for k in keys if k in value}
+        observations = intent.setdefault('observations', [])
+        if not observations and intent.get('response'):
+            observations.append({'observed_at': None, 'stage': 'legacy_last_snapshot',
+                                 'order': snapshot(intent['response'])})
+        current = snapshot(result)
+        if not observations or observations[-1]['order'] != current:
+            observations.append({'observed_at': datetime.now(timezone.utc).isoformat(),
+                'stage': getattr(self, 'execution_stage', 'order_query_or_response'), 'order': current})
         self.intents[client_id]['status'] = 'observed'
         self.intents[client_id]['order_id'] = result.get('orderId', result.get('algoId'))
         self.intents[client_id]['response'] = result

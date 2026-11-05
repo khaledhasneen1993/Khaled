@@ -56,12 +56,13 @@ async def preflight(exchange, symbol, websocket=True):
     guard = json.loads(guard_path.read_text()) if guard_path.exists() else {}
     storage_failed = operations.get('storage_failed', False)
     pending_accounting = sum(r.get('trade', {}).get('accounting_status') == 'pending' for r in exchange.executions.values())
+    pending_prices = sum(bool(r.get('fill_price_pending')) for r in exchange.executions.values())
     unresolved = []
     for client_id, intent in exchange.intents.items():
         if intent['status'] == 'rejected': continue
         record = exchange.executions.get(exchange.execution_key(intent['symbol'], intent.get('order_id')))
         if intent['status'] == 'pending' or (intent['type'] == 'market' and (
-                not record or record['order'].get('status') not in ('FILLED', 'EXPIRED', 'CANCELED', 'REJECTED', 'EXPIRED_IN_MATCH'))):
+                not record or record.get('fill_price_pending') or record['order'].get('status') not in ('FILLED', 'EXPIRED', 'CANCELED', 'REJECTED', 'EXPIRED_IN_MATCH'))):
             unresolved.append(client_id)
     return {'session_guard_active': bool(guard.get('active')), 'storage_failed': storage_failed,
         'unresolved_intents': unresolved, 'pending_accounting': pending_accounting, 'local_kill_latch': kill, 'mode': 'demo', 'equity_usdt': exchange.equity, 'available_usdt': exchange.free,
@@ -73,7 +74,8 @@ async def preflight(exchange, symbol, websocket=True):
         'order_submission_verified': False, 'protection_acceptance_verified': False,
         'apiRestrictions': 'not used; Demo 404 cannot establish permissions',
         'local_pending_intents': sum(i['status'] == 'pending' for i in exchange.intents.values()),
-        'requires_operator_review': bool(exchange.positions or orders or kill or guard.get('active') or storage_failed or unresolved or pending_accounting
+        'pending_execution_prices': pending_prices,
+        'requires_operator_review': bool(exchange.positions or orders or kill or guard.get('active') or storage_failed or unresolved or pending_accounting or pending_prices
                                          or not choice.get('entry_order_valid', False) or can_trade is not True or websocket and not ws_ok)}
 
 

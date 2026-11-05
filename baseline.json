@@ -1,6 +1,6 @@
 {
   "name": "Khaled Cascade Hunter",
-  "version": "3.2.0",
+  "version": "3.2.1",
   "status": "approved_source_baseline",
   "python": ">=3.11",
   "primary_entrypoint": "run_bot.py",

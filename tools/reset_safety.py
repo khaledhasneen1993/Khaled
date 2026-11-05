@@ -24,10 +24,10 @@ def reviewed_reset_state(data, root, cfg):
         key = intent['symbol'] + ':' + str(intent.get('order_id'))
         record = executions.get(key)
         if intent['status'] == 'pending' or intent['type'] == 'market' and (
-                not record or record['order'].get('status') not in terminal):
+                not record or record.get('fill_price_pending') or record['order'].get('status') not in terminal):
             raise ValueError('Unresolved order intent remains; restore it before reset')
-    if any(r.get('trade', {}).get('accounting_status') == 'pending' for r in executions.values()):
-        raise ValueError('Pending accounting remains; restore exact executions before reset')
+    if any(r.get('fill_price_pending') or r.get('trade', {}).get('accounting_status') == 'pending' for r in executions.values()):
+        raise ValueError('Pending accounting or execution price remains; restore exact executions before reset')
     kill = KillSwitch(cfg['kill_switch'])
     kill.restore(data['operations']['kill'])
     kill.roll_day(data.get('equity_usdt'))

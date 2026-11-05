@@ -148,6 +148,9 @@ class DynamicPaperHunter(dynamic.CascadeHunter, PaperState):
             if trade.get('reduceOnly') and trade.get('signal_id'):
                 groups.setdefault(trade['signal_id'], []).append(trade)
         for signal_id, closes in groups.items():
+            # An older partial fill may acquire its price after the final exit.
+            # Final reason/time belong to execution chronology, not arrival order.
+            closes.sort(key=lambda t: (datetime.fromisoformat(t.get('exit_time', t['timestamp'])).timestamp(), int(t['id'])))
             final = closes[-1]
             stored = final.get('exit_position')
             if not stored: continue
@@ -160,9 +163,18 @@ class DynamicPaperHunter(dynamic.CascadeHunter, PaperState):
             active = self.positions.get(final['symbol'])
             if active and active.get('signal_id') == signal_id and final['symbol'] in exchange.positions: continue
             if entry.get('accounting_status') != 'complete' or any(t.get('accounting_status') != 'complete' for t in closes): continue
+            for close in closes:
+                facts = dict(leverage=entry.get('leverage'), margin=entry.get('margin'),
+                    entry_order_id=entry.get('entry_order_id'),
+                    entry_time=datetime.fromtimestamp(entry['opened_at'], timezone.utc).isoformat())
+                close.update(facts)
+                record = exchange.executions.get(exchange.execution_key(close['symbol'], close['id']))
+                if record and record.get('trade'): record['trade'].update(facts)
             if not final.get('exit_detail'):
                 stored = dict(stored, entry_fee=entry['entry_fee'], amount=entry['amount'],
                               entry=entry['entry'], leverage=entry['leverage'], margin=entry['margin'])
+                for field in ('expected_entry', 'actual_entry', 'entry_slippage_bps'):
+                    if field in entry: stored[field] = entry[field]
                 fees = sum(t['fee_usdt'] for t in closes)
                 price = sum(t['amount'] * t['price'] for t in closes) / quantity
                 reason = final.get('exit_reason', 'recovered_close')

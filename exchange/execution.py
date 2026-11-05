@@ -12,7 +12,8 @@ from decimal import Decimal, InvalidOperation
 from infra.journal import atomic_json
 from paper_account import make_position
 from risk.slippage import entry_slippage_bps, exit_slippage_bps
-from .orders import ExchangeError, ExecutionUnknown, OrderRejected, safe_create_order
+from .orders import ExchangeError, ExecutionUnknown, FillPriceUnavailable, OrderRejected, safe_create_order
+from .fill_price import execution_price, positive_decimal
 from .quantity import validate_quantity, OrderValidationError
 from .leverage import bracket_for
 
@@ -55,16 +56,56 @@ class DurableExecution:
         return record
 
     async def settle_fill(self, symbol, order):
+        order_id, client_id = str(order['orderId']), order.get('clientOrderId')
         for attempt in range(self.cfg['exchange']['order_poll_attempts'] + 1):
+            qty = positive_decimal(order.get('executedQty'))
             if order.get('status') in TERMINAL:
-                if float(order.get('executedQty', 0)) > 0: return order
-                raise ExchangeError(400)
+                if qty is None: raise ExchangeError(400)
+                if self.known_execution_price(symbol, order)[0] is not None: return order
+                record = self.executions.get(self.execution_key(symbol, order_id))
+                if record: self.remember_unpriced_fill(symbol, order, record['options'], record['side'])
             if attempt == self.cfg['exchange']['order_poll_attempts']: break
-            await asyncio.sleep(self.cfg['exchange']['order_poll_sec'])
+            # A FILLED acknowledgement missing price gets an immediate query;
+            # further reads use the existing bounded settlement policy.
+            if attempt or order.get('status') not in TERMINAL:
+                await asyncio.sleep(self.cfg['exchange']['order_poll_sec'])
             order = await self._request('GET', '/fapi/v1/order', {'symbol': self.raw(symbol), 'orderId': order['orderId']}, retry=True)
+            if str(order.get('orderId')) != order_id or client_id and order.get('clientOrderId') != client_id:
+                raise ExecutionUnknown()
             client = order.get('clientOrderId')
             if client in self.intents: self.resolve_intent(client, order)
+            record = self.executions.get(self.execution_key(symbol, order_id))
+            if record: order = self._remember_order(symbol, order, record['options'], record['side'])['order']
+        if positive_decimal(order.get('executedQty')) is not None and self.known_execution_price(symbol, order)[0] is None:
+            raise FillPriceUnavailable()
         raise ExecutionUnknown()
+
+    def known_execution_price(self, symbol, order):
+        price, source = execution_price(order)
+        record = self.executions.get(self.execution_key(symbol, order.get('orderId')), {})
+        trade = record.get('trade') or {}
+        if price is None and positive_decimal(order.get('executedQty')) == positive_decimal(trade.get('amount')):
+            price = positive_decimal(trade.get('price'))
+            if price is not None: source = record.get('price_source', 'persisted_execution')
+        return price, source
+
+    def remember_unpriced_fill(self, symbol, order, options, side):
+        record = self._remember_order(symbol, order, options, side)
+        quantity = positive_decimal(record['order'].get('executedQty'))
+        if quantity is None: raise ExecutionUnknown()
+        record['fill_price_pending'] = True
+        if not options.get('reduceOnly'):
+            prior = record.get('entry_facts') or {}
+            stamp = order.get('updateTime', order.get('time'))
+            opened_at = prior.get('opened_at') or (stamp / 1000 if stamp else datetime.now(timezone.utc).timestamp())
+            record['entry_facts'] = dict(signal_id=order['clientOrderId'], side=side,
+                entry=None, amount=float(quantity), leverage=options.get('leverage'), margin=None,
+                opened_at=opened_at, entry_fee=None, accounting_status='pending',
+                entry_order_id=str(order['orderId']), atr_at_entry=options.get('exit_atr'),
+                atr_source=options.get('atr_source', 'unknown'), expected_entry=options.get('expected_price'),
+                actual_entry=None, entry_slippage_bps=None)
+        self._flush_executions()
+        return record
 
     async def order_fills(self, symbol, order_id):
         ec = self.cfg['exchange']
@@ -165,8 +206,19 @@ class DurableExecution:
         self.execution_stage = 'fill_persistence'
         record = self._remember_order(symbol, order, options, side)
         order = record['order']
-        actual, filled = float(order.get('avgPrice', 0)), float(order.get('executedQty', 0))
-        if actual <= 0 or filled <= 0: raise ExecutionUnknown()
+        price, source = self.known_execution_price(symbol, order)
+        quantity = positive_decimal(order.get('executedQty'))
+        if quantity is None: raise ExecutionUnknown()
+        if price is None:
+            self.execution_stage = 'fill_price_recovery'
+            self.remember_unpriced_fill(symbol, order, options, side)
+            order = await self.settle_fill(symbol, order)
+            record = self._remember_order(symbol, order, options, side)
+            price, source = self.known_execution_price(symbol, order)
+            if price is None: raise FillPriceUnavailable()
+        actual, filled = float(price), float(positive_decimal(order.get('executedQty')))
+        record.pop('fill_price_pending', None)
+        record.update(price_source=source, average_exact=str(price))
         reducing = bool(options.get('reduceOnly'))
         expected = float(options.get('expected_price') or actual)
         timestamp = order.get('updateTime', order.get('time'))
@@ -176,7 +228,7 @@ class DurableExecution:
             'reduceOnly': reducing, 'fee_usdt': 0., 'pnl_usdt': 0., 'accounting_status': 'pending',
             'balance_usdt': self.balance, 'mode': self.mode, 'recovered': recovered,
             'protection_status': 'unconfirmed' if not reducing else 'closed',
-            'emergency': bool(self.execution_fault), 'signal_id': options.get('signal_id') if reducing else order['clientOrderId']}
+            'emergency': bool(self.execution_fault or record.get('emergency')), 'signal_id': options.get('signal_id') if reducing else order['clientOrderId']}
         # A later cumulative fill invalidates provisional/previous accounting.
         if trade['amount'] != filled:
             trade.update(amount=filled, price=actual, fee_usdt=0., pnl_usdt=0., accounting_status='pending')
@@ -185,15 +237,22 @@ class DurableExecution:
             record['entry_facts'] = {
                 'signal_id': trade['signal_id'], 'side': side, 'entry': actual, 'amount': filled,
                 'leverage': leverage, 'margin': actual * filled / leverage if leverage else None,
-                'opened_at': datetime.fromisoformat(stamp).timestamp(), 'entry_fee': trade['fee_usdt'],
+                'opened_at': (record.get('entry_facts') or {}).get('opened_at', datetime.fromisoformat(stamp).timestamp()), 'entry_fee': trade['fee_usdt'],
                 'accounting_status': trade['accounting_status'], 'entry_order_id': str(order['orderId']),
-                'atr_at_entry': options.get('exit_atr'), 'atr_source': options.get('atr_source', 'unknown')}
-            trade.update(entry_time=stamp, leverage=leverage, margin=record['entry_facts']['margin'])
+                'atr_at_entry': options.get('exit_atr'), 'atr_source': options.get('atr_source', 'unknown'),
+                'expected_entry': expected, 'actual_entry': actual,
+                'entry_slippage_bps': entry_slippage_bps(expected, actual, side)}
+            trade.update(entry_time=stamp, leverage=leverage, margin=record['entry_facts']['margin'],
+                expected_entry=expected, actual_entry=actual,
+                entry_slippage_bps=record['entry_facts']['entry_slippage_bps'])
         # The fill is a fact even if building risk levels fails next.
         record['trade'] = trade
         self._flush_executions()
         self._upsert_trade(trade)
         pos = record.get('position')
+        if recovered and not reducing:
+            closed_qty = sum(t['amount'] for t in self.trades if t.get('reduceOnly') and t.get('signal_id') == trade['signal_id'])
+            if math.isclose(closed_qty, filled, rel_tol=self.cfg['exchange']['fill_qty_tolerance_pct']): facts_only = True
         if facts_only and not reducing:
             await self.sync_accounting()
             return dict(record['trade'])
@@ -300,7 +359,7 @@ class DurableExecution:
             options = intent.get('params', {})
             if options.get('brackets'): self.brackets[intent['symbol']] = options['brackets']
             record = self.executions.get(self.execution_key(intent['symbol'], intent.get('order_id')))
-            if record and record.get('order', {}).get('status') in TERMINAL and (record.get('trade') or float(record['order'].get('executedQty', 0)) == 0):
+            if record and not record.get('fill_price_pending') and record.get('order', {}).get('status') in TERMINAL and (record.get('trade') or float(record['order'].get('executedQty', 0)) == 0):
                 if record.get('trade'):
                     self._upsert_trade(record['trade'])
                     if not record['trade']['reduceOnly'] and not record.get('position'):
@@ -315,9 +374,12 @@ class DurableExecution:
                 unresolved = True
                 continue
             self.resolve_intent(client_id, order)
-            self._remember_order(intent['symbol'], order, options, intent['side'])
+            order = self._remember_order(intent['symbol'], order, options, intent['side'])['order']
             if float(order.get('executedQty', 0)) > 0:
-                await self._accept_fill(intent['symbol'], order, options, intent['side'], recovered=True, facts_only=self.emergency_mode)
+                try:
+                    await self._accept_fill(intent['symbol'], order, options, intent['side'], recovered=True, facts_only=self.emergency_mode)
+                except FillPriceUnavailable:
+                    unresolved = True
             if order.get('status') not in TERMINAL: unresolved = True
         await self.sync_accounting()
         if not self.emergency_mode and not await self.recover_protection_intents(): unresolved = True
@@ -339,7 +401,12 @@ class DurableExecution:
             self.resolve_intent(client_id, order)
             self._remember_order(symbol, order, intent.get('params', {}), intent['side'])
             if float(order.get('executedQty', 0)) > 0:
-                await self._accept_fill(symbol, order, intent.get('params', {}), intent['side'], recovered=True, facts_only=True)
+                try:
+                    await self._accept_fill(symbol, order, intent.get('params', {}), intent['side'], recovered=True, facts_only=True)
+                except FillPriceUnavailable:
+                    # The remainder is terminal/cancelled. Missing entry price
+                    # cannot prevent reducing the independently proven position.
+                    pass
 
     async def create_order(self, symbol, type, side, amount, params=None):
         self.execution_stage = 'before_post_validation'
@@ -356,6 +423,8 @@ class DurableExecution:
             latest = next((i for cid, i in reversed(list(self.intents.items())) if cid in current_ids), {})
             if self.storage_fault or self.journal.failed:
                 self.execution_fault = 'storage_failure'
+            elif isinstance(error, FillPriceUnavailable):
+                self.execution_fault = 'fill_price_unavailable'
             elif isinstance(error, OrderRejected):
                 self.execution_fault = ('close_rejected' if reducing else
                     'protection_rejected' if latest.get('type') in ('STOP_MARKET', 'TAKE_PROFIT_MARKET') else 'order_rejected')
@@ -363,6 +432,9 @@ class DurableExecution:
                 self.execution_fault = 'close_validation_failed' if reducing else 'protection_validation_failed'
             else:
                 self.execution_fault = 'order_execution_uncertain'
+            for record in self.executions.values():
+                if record['symbol'] == symbol and record['order'].get('clientOrderId') in current_ids:
+                    record['emergency'] = True
             affected = next((r for r in reversed(list(self.executions.values())) if r['symbol'] == symbol
                              and r.get('trade') and r['order'].get('clientOrderId') in current_ids), None)
             if affected:
@@ -443,10 +515,16 @@ class DurableExecution:
         self.execution_stage = 'fill_settlement'
         try:
             result = await self.settle_fill(symbol, result)
-        except ExecutionUnknown:
+        except ExecutionUnknown as error:
             latest = self.intents[result['clientOrderId']].get('response', result)
+            stored = self.executions.get(self.execution_key(symbol, result['orderId']))
+            if stored: latest = stored['order']
             if float(latest.get('executedQty', 0)) > 0:
-                await self._accept_fill(symbol, latest, options, side)
+                if isinstance(error, FillPriceUnavailable):
+                    self.execution_stage = 'fill_price_recovery'
+                    self.remember_unpriced_fill(symbol, latest, options, side)
+                else:
+                    await self._accept_fill(symbol, latest, options, side)
             raise
         trade = await self._accept_fill(symbol, result, options, side)
         self.execution_stage = 'account_refresh_after_fill'
