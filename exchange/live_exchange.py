@@ -26,6 +26,7 @@ from infra.rate_limit import TokenBucket, with_backoff
 from risk.slippage import entry_slippage_bps, exit_slippage_bps
 from .orders import ExchangeError, ExecutionUnknown, safe_create_order
 from .execution import DurableExecution
+from .quantity import quantity_rules, validate_quantity, OrderValidationError
 
 
 class LiveExchange(DurableExecution, PaperExchange):
@@ -200,13 +201,11 @@ class LiveExchange(DurableExecution, PaperExchange):
                 continue
             symbol = raw['baseAsset'] + '/USDT:USDT'
             filters = {f['filterType']: f for f in raw['filters']}
-            lot = filters.get('MARKET_LOT_SIZE', filters['LOT_SIZE'])
-            if Decimal(lot['stepSize']) == 0:
-                lot = filters['LOT_SIZE']
+            bounds = quantity_rules(filters)
             self.markets[symbol] = {'id': raw['symbol'], 'symbol': symbol, 'linear': True, 'swap': True,
                 'settle': raw['marginAsset'], 'active': raw['status'] == 'TRADING', 'filters': filters,
-                'step': lot['stepSize'], 'tick': filters['PRICE_FILTER']['tickSize'],
-                'limits': {'amount': {'min': float(lot['minQty']), 'max': float(lot['maxQty'])},
+                'step': str(bounds['step']), 'tick': filters['PRICE_FILTER']['tickSize'],
+                'limits': {'amount': {'min': float(bounds['min']), 'max': float(bounds['max'])},
                            'cost': {'min': float(filters.get('MIN_NOTIONAL', {}).get('notional', 0))}}}
         # Do not silently change global account position/multi-asset modes.
         hedge = await self._request('GET', '/fapi/v1/positionSide/dual', retry=True)
@@ -286,6 +285,19 @@ class LiveExchange(DurableExecution, PaperExchange):
         ceiling = None
         while True:
             choice = choose_leverage(brackets, margin, price, lambda q: float(self.amount_to_precision(symbol, q)), ceiling)
+            market = self.market(symbol)
+            choice['quantity_limits'] = dict(market['limits']['amount'])
+            try:
+                validate_quantity(market, choice['amount'], price)
+            except OrderValidationError as error:
+                choice.update(entry_order_valid=False, validation_reason=str(error))
+                if confirm:
+                    self.journal.log('entry_validation_blocked', symbol=symbol, stage='before_leverage_and_post',
+                        reason=str(error), amount=choice['amount'], leverage=choice['leverage'],
+                        min_qty=market['limits']['amount'].get('min'), max_qty=market['limits']['amount'].get('max'),
+                        recovery_action='skip_entry_preserve_margin_and_leverage_policy')
+                break
+            choice['entry_order_valid'] = True
             if not confirm: break
             try:
                 maximum = await self.set_leverage(choice['leverage'], symbol)
@@ -345,7 +357,7 @@ class LiveExchange(DurableExecution, PaperExchange):
         options = params or {}
         client_id = options['newClientOrderId']
         quantity = self.amount_to_precision(symbol, amount)
-        if Decimal(quantity) <= 0: raise ValueError('Quantity rounds to zero')
+        validate_quantity(self.market(symbol), quantity)
         if type in ('STOP_MARKET', 'TAKE_PROFIT_MARKET'):
             values = {'algoType': 'CONDITIONAL', 'symbol': self.raw(symbol), 'side': side.upper(), 'type': type,
                 'quantity': quantity, 'reduceOnly': 'true', 'clientAlgoId': client_id,

@@ -73,7 +73,7 @@ async def preflight(exchange, symbol, websocket=True):
         'apiRestrictions': 'not used; Demo 404 cannot establish permissions',
         'local_pending_intents': sum(i['status'] == 'pending' for i in exchange.intents.values()),
         'requires_operator_review': bool(exchange.positions or orders or kill or guard.get('active') or storage_failed or unresolved or pending_accounting
-                                         or can_trade is not True or websocket and not ws_ok)}
+                                         or not choice.get('entry_order_valid', False) or can_trade is not True or websocket and not ws_ok)}
 
 
 def main():

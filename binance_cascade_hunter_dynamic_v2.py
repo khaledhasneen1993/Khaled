@@ -134,7 +134,7 @@ class CascadeHunter:
         price = (await self.exchange.fetch_ticker(symbol))["last"]
         if getattr(self, 'execution_mode', 'paper') == 'testnet' and self.cfg['exchange'].get('leverage_policy') == 'maximum_by_bracket':
             choice = await self.exchange.select_leverage(symbol, usdt * self.cfg['margin_fraction_per_position'], price)
-            return choice['amount']
+            return choice['amount'] if choice.get('entry_order_valid', True) else 0.0
         notional = usdt * MAX_POSITION_PCT * LEVERAGE
         if getattr(self, "execution_mode", "paper") == "mainnet":
             notional *= self.exchange.allocation_fraction

@@ -11,7 +11,8 @@ from datetime import datetime, timezone
 from infra.journal import atomic_json
 from paper_account import make_position
 from risk.slippage import entry_slippage_bps, exit_slippage_bps
-from .orders import ExchangeError, ExecutionUnknown, safe_create_order
+from .orders import ExchangeError, ExecutionUnknown, OrderRejected, safe_create_order
+from .quantity import validate_quantity, OrderValidationError
 from .leverage import bracket_for
 
 TERMINAL = {'FILLED', 'EXPIRED', 'CANCELED', 'REJECTED', 'EXPIRED_IN_MATCH'}
@@ -306,8 +307,20 @@ class DurableExecution:
         try:
             return await self._create_order(symbol, type, side, amount, params)
         except Exception as error:
-            self.execution_fault = 'order_execution_uncertain'
             current_ids = set(self.intents) - previous_ids
+            reducing = bool((params or {}).get('reduceOnly'))
+            if isinstance(error, OrderValidationError) and not current_ids and not reducing:
+                self.journal.log('entry_validation_blocked', symbol=symbol, stage='before_post',
+                    error_type=type_name(error), reason=str(error), recovery_action='no_order_sent')
+                raise
+            latest = next((i for cid, i in reversed(list(self.intents.items())) if cid in current_ids), {})
+            if isinstance(error, OrderRejected):
+                self.execution_fault = ('close_rejected' if reducing else
+                    'protection_rejected' if latest.get('type') in ('STOP_MARKET', 'TAKE_PROFIT_MARKET') else 'order_rejected')
+            elif isinstance(error, OrderValidationError):
+                self.execution_fault = 'close_validation_failed' if reducing else 'protection_validation_failed'
+            else:
+                self.execution_fault = 'order_execution_uncertain'
             affected = next((r for r in reversed(list(self.executions.values())) if r['symbol'] == symbol
                              and r.get('trade') and r['order'].get('clientOrderId') in current_ids), None)
             if affected:
@@ -318,7 +331,8 @@ class DurableExecution:
             self.journal.log('order_execution_failed', symbol=symbol, stage='execution',
                 order_id=latest.get('order_id'), client_order_id=latest.get('params', {}).get('newClientOrderId'),
                 error_type=type_name(error), http_status=getattr(error, 'status', 0),
-                exchange_error_code=getattr(error, 'code', 0), recovery_action='reconcile_before_resend')
+                exchange_error_code=getattr(error, 'code', 0),
+                recovery_action='review_definitive_rejection' if isinstance(error, OrderRejected) else 'reconcile_before_resend')
             raise
 
     async def _create_order(self, symbol, type, side, amount, params=None):
@@ -342,6 +356,8 @@ class DurableExecution:
                 raise ExecutionUnknown()
             choice = self.selected_leverage.get(symbol)
             if self.cfg['exchange'].get('leverage_policy') == 'maximum_by_bracket':
+                if choice and choice.get('entry_order_valid') is False:
+                    raise OrderValidationError(choice['validation_reason'])
                 if not choice or not choice['confirmed']: raise ValueError('Leverage must be selected and confirmed before sizing')
                 amount = choice['amount']
                 leverage = choice['leverage']
@@ -358,8 +374,7 @@ class DurableExecution:
             make_position(side, expected, amount, leverage,
                 options.get('exit_atr', expected * self.cfg['atr']['fallback_atr_pct']), risk_cfg, self.equity, self.fee_rate)
             market = self.market(symbol)
-            if amount < market['limits']['amount']['min'] or amount * expected < market['limits']['cost']['min']:
-                raise ValueError('Order below exchange minimum; size is never increased')
+            validate_quantity(market, self.amount_to_precision(symbol, amount), expected)
             if amount * expected / leverage + amount * expected * self.fee_rate > self.free:
                 raise ValueError('Insufficient actual available margin including entry fee')
         else:
@@ -367,7 +382,9 @@ class DurableExecution:
             if not remote: raise ExecutionUnknown()
             residual = float(remote[0]['positionAmt'])
             if (residual > 0) != (side == 'sell'): raise ValueError('Close side does not reduce actual position')
-            amount = min(amount, abs(residual))
+            maximum = self.market(symbol)['limits']['amount'].get('max', float('inf'))
+            amount = min(amount, abs(residual), maximum)
+            validate_quantity(self.market(symbol), self.amount_to_precision(symbol, amount))
         result = await safe_create_order(self, {'symbol': symbol, 'type': type, 'side': side, 'amount': amount, 'params': options}, self.journal)
         self._remember_order(symbol, result, options, side)
         try:

@@ -1,12 +1,17 @@
 """At-most-once intent handling. An uncertain POST is never blindly retried."""
 import asyncio
 import uuid
+from .quantity import OrderValidationError
 
 
 class ExchangeError(RuntimeError):
     def __init__(self, status=0, code=0, retry_after=0):
         self.status, self.code, self.retry_after = status, code, retry_after
         super().__init__(f'Exchange request failed (HTTP {status}, code {code})')
+
+
+class OrderRejected(ExchangeError):
+    """POST definitively rejected and the same client ID not found by query."""
 
 
 class ExecutionUnknown(ExchangeError):
@@ -30,6 +35,9 @@ async def safe_create_order(exchange, order_params, journal):
             result = await exchange.submit_order(**params)
             exchange.resolve_intent(client_id, result)
             return result
+        except OrderValidationError:
+            exchange.reject_intent(client_id)
+            raise
         except (ExchangeError, OSError, asyncio.TimeoutError) as error:
             existing = None
             definitive_absence = False
@@ -56,6 +64,6 @@ async def safe_create_order(exchange, order_params, journal):
             exchange.reject_intent(client_id)
             if attempt + 1 == attempts or status not in (418, 429):
                 journal.log('order_failed', symbol=params['symbol'], code=code, status=status)
-                raise ExchangeError(status, code) from None
+                raise OrderRejected(status, code) from None
             await asyncio.sleep(max(getattr(error, 'retry_after', 0), exchange.cfg['exchange']['backoff_base'] ** attempt))
     raise ExecutionUnknown()

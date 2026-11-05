@@ -336,7 +336,7 @@ def test_failed_initial_protection_flattens_real_fill(live, tmp_path):
         with patch('exchange.orders.asyncio.sleep', new_callable=AsyncMock):
             assert not await bot.enter('BTC/USDT:USDT', 'buy', 100)
         assert not server.qty  # possible real entry was not mistaken for a no-op
-        assert bot.safety.kill.triggered == 'order_execution_uncertain'
+        assert bot.safety.kill.triggered == 'protection_rejected'
         assert any(t['side'] == 'buy' for t in live.trades)
         assert any(t['reduceOnly'] for t in live.trades)
         assert live.trades[-1]['exit_detail']['net_pnl_usdt'] == pytest.approx(server.wallet - 100)
