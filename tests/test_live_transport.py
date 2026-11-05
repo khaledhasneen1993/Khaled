@@ -214,7 +214,7 @@ class SimulatedBinance:
         data = None
         if path == '/fapi/v1/time': data = {'serverTime': int(time.time() * 1000)}
         elif path == '/fapi/v1/marginType': data = {'code': 200}
-        elif path == '/fapi/v1/leverage': data = {'leverage': 50}
+        elif path == '/fapi/v1/leverage': data = {'leverage': int(p['leverage'])}
         elif path == '/fapi/v1/ticker/price': data = {'price': str(self.price)}
         elif path == '/fapi/v1/klines':
             data = [[i * 60000, '100', '100', '100', '100', '1'] for i in range(int(p['limit']))]
@@ -224,8 +224,8 @@ class SimulatedBinance:
         elif path == '/fapi/v3/account':
             data = {'assets': [{'asset': 'USDT', 'walletBalance': str(self.wallet),
                 'marginBalance': str(self.wallet + (self.price - 100) * self.qty),
-                'availableBalance': str(self.wallet - abs(self.qty) * self.price / 50),
-                'initialMargin': str(abs(self.qty) * self.price / 50)}]}
+                'availableBalance': str(self.wallet - abs(self.qty) * self.price / load_config()["leverage"]),
+                'initialMargin': str(abs(self.qty) * self.price / load_config()["leverage"])}]}
         elif path == '/fapi/v1/order' and method == 'POST':
             data = self.fill(p['side'], float(p['quantity']), p['newClientOrderId'])
         elif path == '/fapi/v1/order' and method == 'GET':
@@ -271,8 +271,8 @@ def test_full_entry_native_protection_and_tp_lifecycle(live, tmp_path):
         bot, server = await runtime_with_transport(live, tmp_path)
         assert await bot.enter('BTC/USDT:USDT', 'buy', 100)
         assert len(server.algos) == 2
-        assert bot.positions['BTC/USDT:USDT']['amount'] == 5
-        server.price = 101
+        assert bot.positions['BTC/USDT:USDT']['amount'] == 1
+        server.price = 102
         await bot.manage_exits()
         assert not bot.positions and not server.qty
         trade = live.trades[-1]
@@ -310,14 +310,14 @@ def test_partial_close_aggregate_accounting_and_residual_flatten(live, tmp_path)
         server.partial_close = True
         with pytest.raises(ExchangeError):
             await bot.close_position('BTC/USDT:USDT', 'kill_switch')
-        assert server.qty == 2.5
+        assert server.qty == .5
         # Terminal partial close is known. A new reduce-only order closes the
         # observed remainder; realized PnL/fees include both fills exactly once.
         await bot.close_position('BTC/USDT:USDT', 'kill_switch')
         assert not server.qty and not bot.positions
         detail = live.trades[-1]['exit_detail']
         assert detail['net_pnl_usdt'] == pytest.approx(server.wallet - 100)
-        assert sum(t['amount'] for t in live.trades if t['reduceOnly']) == 5
+        assert sum(t['amount'] for t in live.trades if t['reduceOnly']) == 1
         await live.close()
     run(check())
 
@@ -371,12 +371,12 @@ def test_scaling_stays_at_one_percent_without_review(tmp_path):
 def test_expected_already_isolated_error_is_not_an_api_incident(live):
     async def handler(request):
         if request.url.path.endswith('marginType'): return httpx.Response(400, json={'code': -4046})
-        return httpx.Response(200, json={'leverage': 50})
+        return httpx.Response(200, json={'leverage': live.cfg['leverage']})
     async def check():
         await live.client.aclose()
         live.client = httpx.AsyncClient(base_url='https://example.test', transport=httpx.MockTransport(handler))
         live.on_api_error = Mock()
-        await live.set_leverage(50, 'BTC/USDT:USDT')
+        await live.set_leverage(live.cfg['leverage'], 'BTC/USDT:USDT')
         live.on_api_error.assert_not_called()
         assert 'BTC/USDT:USDT' in live._leverage_set
         await live.close()

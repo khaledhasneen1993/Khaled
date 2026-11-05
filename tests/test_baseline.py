@@ -14,3 +14,11 @@ class BaselineTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):strategy.CascadeHunter()
         self.assertFalse(hasattr(strategy,'API_KEY'))
         self.assertFalse(hasattr(strategy.CascadeHunter,'scan_and_trade'))
+
+
+def test_approved_leverage_all_execution_paths():
+    from risk.config import load_config
+    from paper_account import PaperExchange
+    cfg = load_config()
+    assert cfg["leverage"] == cfg["exposure"]["leverage"] == strategy.LEVERAGE == 10
+    assert PaperExchange(None).leverage == 10

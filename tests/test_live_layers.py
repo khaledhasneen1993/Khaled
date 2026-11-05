@@ -147,15 +147,15 @@ def test_exposure_limits():
     assert can_open(state, 'BTCUSDT', 'long', 31, cfg) == (False, 'max_long_exposure')
     state.open_positions = {str(i): {'side': 'buy', 'entry': 1, 'amount': 1} for i in range(3)}
     assert can_open(state, 'BTCUSDT', 'long', 1, cfg) == (False, 'max_positions')
-    # Explicit default margin basis permits the original 5x-equity notional.
+    # Explicit default margin basis permits the configured position notional.
     state.open_positions = {}
-    assert can_open(state, 'BTCUSDT', 'long', 500, CFG['exposure'])[0]
+    assert can_open(state, 'BTCUSDT', 'long', 100 * .1 * CFG['leverage'], CFG['exposure'])[0]
 
 
 def test_correlation_limit():
-    state = SimpleNamespace(equity=100., open_positions={s: {'side': 'buy', 'entry': 100, 'amount': 5}
+    state = SimpleNamespace(equity=100., open_positions={s: {'side': 'buy', 'entry': 100, 'amount': CFG['leverage'] * .1}
         for s in ('BTCUSDT', 'ETHUSDT')})
-    assert can_open(state, 'SOLUSDT', 'long', 500, CFG['exposure']) == (False, 'correlated_limit')
+    assert can_open(state, 'SOLUSDT', 'long', 100 * .1 * CFG['leverage'], CFG['exposure']) == (False, 'correlated_limit')
 
 
 def test_funding_close_before_settlement():
@@ -207,7 +207,7 @@ def test_equity_current_used(tmp_path):
         data.price = 99.9
         await bot.exchange.fetch_ticker('BTC/USDT:USDT')
         # Current unrealized losses are included as well as realized wallet PnL.
-        expected = float(bot.exchange.amount_to_precision('ETH/USDT:USDT', bot.equity * .1 * 50 / data.price))
+        expected = float(bot.exchange.amount_to_precision('ETH/USDT:USDT', bot.equity * .1 * CFG["leverage"] / data.price))
         assert await bot.size_position('ETH/USDT:USDT') == expected
     run(check())
 

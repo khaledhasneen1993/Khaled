@@ -16,7 +16,7 @@ log = logging.getLogger("CASCADE")
 
 # === CONFIG ===
 
-LEVERAGE = 50
+LEVERAGE = load_config()["leverage"]
 MAX_POSITION_PCT = 0.10          # 10% من رصيد المحفظة الحالي كهامش لكل صفقة
 CASCADE_THRESHOLD = 0.012        # 1.2%
 VOLUME_SPIKE = 3.5

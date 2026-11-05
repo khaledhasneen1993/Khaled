@@ -1,4 +1,4 @@
-# Khaled 3.0.2 — approved source baseline and readiness review, 2026-11-04
+# Khaled 3.0.3 — approved source baseline and readiness review, 2026-11-05
 
 **Source-release status: approved current project baseline, as requested by the repository owner. Approval covers the repository source and offline tests. Live acceptance remains pending. `exchange.mode` remains `paper`; no Mainnet approval certificate was created.**
 
@@ -10,7 +10,7 @@ The environment has no configured Binance API credentials or Telegram credential
 
 | Layer | Implementation and behavior |
 |---|---|
-| Live adapter | `exchange/live_exchange.py`, alongside PaperExchange; same current public method signatures. Environment-only credentials, HMAC over URL-encoded parameters, time synchronization, isolated 50× setup once per symbol, actual fills and current USDT account equity. One-way/single-asset account required. |
+| Live adapter | `exchange/live_exchange.py`, alongside PaperExchange; same current public method signatures. Environment-only credentials, HMAC over URL-encoded parameters, time synchronization, isolated 10× setup once per symbol, actual fills and current USDT account equity. One-way/single-asset account required. |
 | Native protection | Futures Algo API reduce-only SL and TP. Stop rounding moves inward; TP rounding moves outward. New protective order is submitted, queried and durably recorded before cancelling the old order. Actual reported liquidation price is checked in addition to the existing approximate guard. |
 | Order uncertainty | Unique `kh_<uuid>` IDs, fsynced intent before POST, query/adopt after failures, no blind resubmission after ambiguous timeouts/503. Confirmed rejected 429/418 requests can use fresh IDs, at most three submissions. Unknown outcomes latch the runtime. |
 | KillSwitch | Stable daily starting equity, realized/unrealized drawdown, four consecutive losses, stale stream, sliding API error window, spread spikes. Persisted latch; separate watchdog gates entries while REST is slow. Market flatten/cancel attempts, durable events and alerts. Remaining protective orders are retained if flatten fails. |
@@ -20,7 +20,7 @@ The environment has no configured Binance API credentials or Telegram credential
 | Funding | Uses actual nextFundingTime from Binance premiumIndex, rather than assuming every contract settles at fixed eight-hour boundaries. Closes paying positions above the configured threshold inside the warning window. |
 | Slippage/accounting | Entry and exit expected/actual prices and adverse bps; short sign handled correctly. Actual USDT fees, realized PnL and fill quantity coverage checked. Partial closes aggregate all fills before final position net PnL. |
 | Alerts/reports | Environment-only Telegram settings, queued bounded/split messages, startup delivery preflight, trade/security notifications and previous-day UTC report. Delivery failure is journaled/latched; network delivery cannot be guaranteed while offline. |
-| Current equity | Sizing uses current equity, including unrealized losses. Base margin remains 10%, leverage 50× and max positions three. Mainnet allocation overlay begins at 1% of target size and risk budget. |
+| Current equity | Sizing uses current equity, including unrealized losses. Base margin remains 10%, leverage 10× and max positions three. Mainnet allocation overlay begins at 1% of target size and risk budget. |
 | Time Stop | After existing TP/SL checks, close at 45 minutes if favorable price change is below 0.2%. No change to the existing ATR/BE/trailing formulas. |
 | Restart/shutdown | Mode-separated state, account process lock, fsynced atomic state, durable order intents/protection, startup reconciliation. Live shutdown attempts flattening and leaves a review latch. |
 | Rollout | Evidence records monitored duration, uninterrupted duration, actual trades and equity samples, bound to code/config fingerprints. Mainnet requires 14 days, seven continuous days, metrics and explicit approval. Each scaling step requires separate reviewed evidence after 14 more monitored days, at most 2×, and applies on restart. |
@@ -92,3 +92,5 @@ The retained July–September 2026 BTC/ETH candle study checks 529,864 hypotheti
 ## Local comparison launcher correction
 
 Added tools/run_comparison_dashboard.py for the existing Ubuntu setup: Final at /root/cascade-git and Khaled at /root/Khaled. Local loopback UI operation does not require the cloud publisher token. The launcher extracts only pinned UI assets, patches source paths to current checkouts, installs both current dependency sets, creates unique state paths, and verifies 100 USDT/zero positions/zero fills before starting the server. It refuses non-paper modes and does not load historical strategy code. An offline integration check prepared actual Final and Khaled accounts and queried the local UI with worker autostart disabled: both reported balance 100 and zero fills. This check did not connect either bot to market streams. JavaScript syntax validation passed for the updated ATR settings display.
+
+Leverage revision 3.0.3: all new positions use baseline leverage 10× in paper/testnet/mainnet. Entry signals, 10% equity margin, three-position limit, and exit formulas are unchanged. Historical exit-validation evidence predates this leverage revision and is not performance evidence for 10×. Existing running processes require a restart; existing positions are not migrated.

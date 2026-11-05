@@ -23,7 +23,7 @@ def test_planned_loss_includes_both_fees():
                                         cfg, equity, cfg['fee_rate'])
                     planned_loss = abs(entry - pos.stop) * amount + pos['entry_fee'] + pos.stop * amount * cfg['fee_rate']
                     assert planned_loss <= equity * cfg['tp_sl']['max_equity_risk_pct'] + 1e-9
-                    assert pos['risk_capped']
+                    assert pos['risk_capped'] == (atr_pct == .03)
                     assert pos['rr'] >= cfg['tp_sl']['min_rr']
 
 
@@ -93,10 +93,10 @@ def test_gap_uses_actual_exit_fill_and_reports_excess_loss(tmp_path):
         data = StreamData()
         bot = V2PaperHunter(tmp_path / 'state.json', market_data=data)
         assert await bot.enter('BTC/USDT:USDT', 'buy', 100)
-        data.price = 98  # A gap can exceed the planned stop budget.
+        data.price = 96  # A gap can exceed the planned stop budget.
         await bot.manage_exits()
         record = bot.exchange.trades[-1]['exit_detail']
-        assert record['exit_price'] == 98
+        assert record['exit_price'] == 96
         assert record['net_pnl_usdt'] == pytest.approx(bot.exchange.balance - 100)
         assert record['net_pnl_usdt'] < -3
     asyncio.run(check())

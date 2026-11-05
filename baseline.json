@@ -1,12 +1,12 @@
 {
   "name": "Khaled Cascade Hunter",
-  "version": "3.0.2",
+  "version": "3.0.3",
   "status": "approved_source_baseline",
   "python": ">=3.11",
   "primary_entrypoint": "run_bot.py",
   "initial_balance_usdt": 100,
   "position_basis": "current_equity",
-  "leverage": 50,
+  "leverage": 10,
   "margin_fraction_per_position": 0.1,
   "max_concurrent_positions": 3,
   "stop_basis": "fill_price",
@@ -38,7 +38,7 @@
     "trail_enabled": true,
     "trail_atr_mult": 1.2
   },
-  "updated_on": "2026-11-04",
+  "updated_on": "2026-11-05",
   "dashboard": {
     "bot_id": "khaled",
     "url": "https://coamowlsyuqbxngijxsu.supabase.co/functions/v1/cascade-dashboard",
@@ -113,7 +113,7 @@
     "max_short_exposure_pct": 0.3,
     "max_gross_exposure_pct": 0.5,
     "max_correlated_same_direction": 2,
-    "leverage": 50,
+    "leverage": 10,
     "correlated_groups": [
       [
         "BTCUSDT",
@@ -183,7 +183,7 @@
     "scale_factor": 2,
     "max_mainnet_fraction": 1.0
   },
-  "approved_on": "2026-11-04",
+  "approved_on": "2026-11-05",
   "approval_scope": "repository_source_and_offline_tests",
   "live_acceptance_status": "pending_testnet",
   "comparison_dashboard": {

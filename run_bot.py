@@ -31,7 +31,7 @@ def main():
         state = str(Path(cfg['exchange']['state_dir']) / 'paper' / state)
     # Constructor refuses mainnet without evidence and explicit operator approval.
     bot = V2PaperHunter(state_path=state, fee_rate=cfg['fee_rate'])
-    logging.getLogger('CASCADE').info('KHALED %s | MODE=%s | 50x | equity margin=10%% | max_positions=3', cfg['version'], bot.execution_mode)
+    logging.getLogger('CASCADE').info('KHALED %s | MODE=%s | %sx | equity margin=10%% | max_positions=3', cfg['version'], bot.execution_mode, cfg['leverage'])
     try:
         asyncio.run(serve(bot))
     except (KeyboardInterrupt, asyncio.CancelledError):

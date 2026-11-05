@@ -23,7 +23,7 @@ class V2Tests(unittest.IsolatedAsyncioTestCase):
     async def test_ten_percent_wallet_margin_on_each_of_three_entries(self):
         for symbol in ("BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT"):
             self.assertTrue(await self.bot.enter(symbol, "buy", 100))
-            self.assertAlmostEqual(self.bot.positions[symbol]["amount"], 5)
+            self.assertAlmostEqual(self.bot.positions[symbol]["amount"], 1)
             self.assertAlmostEqual(self.bot.exchange.positions[symbol]["margin"], 10)
         self.assertAlmostEqual(self.bot.exchange.used, 30)
         self.assertAlmostEqual(self.bot.exchange.free, 70)
@@ -33,28 +33,28 @@ class V2Tests(unittest.IsolatedAsyncioTestCase):
     async def test_long_stop_caps_account_risk_and_tp_has_minimum_rr(self):
         await self.bot.enter("BTC/USDT:USDT", "buy", 100)
         position = self.bot.positions["BTC/USDT:USDT"]
-        self.assertAlmostEqual(position["sl"], 99.4)
-        self.assertAlmostEqual(position["tp"], 100.9)
+        self.assertAlmostEqual(position["sl"], 99.2)
+        self.assertAlmostEqual(position["tp"], 101.2)
         self.data.price = 99.5
         await self.bot.manage_exits()
         self.assertIn("BTC/USDT:USDT", self.bot.positions)
         self.data.price = position["sl"]
         await self.bot.manage_exits()
         self.assertFalse(self.bot.positions)
-        self.assertAlmostEqual(self.bot.exchange.balance, 97)
+        self.assertAlmostEqual(self.bot.exchange.balance, 99.2)
 
     async def test_short_stop_caps_account_risk(self):
         await self.bot.enter("ETH/USDT:USDT", "sell", 100)
         position = self.bot.positions["ETH/USDT:USDT"]
-        self.assertAlmostEqual(position["sl"], 100.6)
-        self.assertAlmostEqual(position["tp"], 99.1)
+        self.assertAlmostEqual(position["sl"], 100.8)
+        self.assertAlmostEqual(position["tp"], 98.8)
         self.data.price = 100.5
         await self.bot.manage_exits()
         self.assertTrue(self.bot.positions)
         self.data.price = position["sl"]
         await self.bot.manage_exits()
         self.assertFalse(self.bot.positions)
-        self.assertAlmostEqual(self.bot.exchange.balance, 97)
+        self.assertAlmostEqual(self.bot.exchange.balance, 99.2)
 
     async def test_incompatible_state_rejected_without_modifying_file(self):
         self.bot.save()
@@ -93,10 +93,10 @@ class V2Tests(unittest.IsolatedAsyncioTestCase):
     async def test_wallet_based_sizing_includes_fees_and_precision(self):
         bot = V2PaperHunter(self.path, fee_rate=0.0005, market_data=self.data)
         await bot.enter("BTC/USDT:USDT", "buy", 100)
-        self.assertAlmostEqual(bot.exchange.balance, 99.75)
+        self.assertAlmostEqual(bot.exchange.balance, 99.95)
         await bot.enter("ETH/USDT:USDT", "buy", 100)
         amount = bot.positions["ETH/USDT:USDT"]["amount"]
-        self.assertAlmostEqual(amount, 4.987)
+        self.assertAlmostEqual(amount, .999)
         self.assertGreater(bot.exchange.free, 0)
 
 

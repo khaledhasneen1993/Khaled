@@ -45,7 +45,7 @@ def main():
     if not math.isfinite(args.fee_rate) or not 0 <= args.fee_rate < 0.01:
         parser.error("--fee-rate must be finite and in [0, 0.01)")
     bot = V2PaperHunter(args.state, args.fee_rate, args.reset)
-    v2.log.info("KHALED %s | equity margin=10%% | leverage=50x | ATR TP/SL | max_positions=3", bot.execution_mode)
+    v2.log.info("KHALED %s | equity margin=10%% | leverage=%sx | ATR TP/SL | max_positions=3", bot.execution_mode, bot.exchange.leverage)
     if bot.execution_mode == "paper":
         v2.log.warning("Paper mode does not simulate liquidation or actual funding fills")
     try:
