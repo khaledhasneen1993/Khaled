@@ -111,8 +111,8 @@ def test_reconcile_size_mismatch():
     remote = remote_exchange([{'symbol': 'BTCUSDT', 'positionAmt': '2', 'entryPrice': '101'}])
     report = run(reconcile(remote, state, Mock()))
     assert report['size_mismatches'] == ['BTCUSDT']
-    assert state.open_positions['BTCUSDT']['amount'] == 2
-    assert state.open_positions['BTCUSDT']['entry'] == 101
+    assert state.open_positions['BTCUSDT']['amount'] == 1  # Preserve the original entry for exact close accounting.
+    assert state.open_positions['BTCUSDT']['entry'] == 100
 
 
 def order_exchange(outcomes, query):

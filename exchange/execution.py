@@ -7,6 +7,7 @@ import asyncio
 import copy
 import math
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 
 from infra.journal import atomic_json
 from paper_account import make_position
@@ -29,6 +30,15 @@ class DurableExecution:
         old = next((t for t in self.trades if str(t['id']) == str(trade['id']) and t['symbol'] == trade['symbol']), None)
         if old is None: self.trades.append(copy.deepcopy(trade))
         else: old.update(copy.deepcopy(trade))
+
+    def merge_strategy_position(self, canonical, local, protection=False):
+        """Only the strategy owns moving stops/flags, never fill facts or fees."""
+        if canonical.get('signal_id') != local.get('signal_id'): return
+        sm = 1 if canonical['side'] == 'buy' else -1
+        if sm * (local['sl'] - canonical['sl']) > 0: canonical['sl'] = local['sl']
+        for key in ('breakeven_armed', 'trail_moved', 'risk_capped'):
+            canonical[key] = canonical.get(key, False) or local.get(key, False)
+        if protection and 'protection' in local: canonical['protection'] = copy.deepcopy(local['protection'])
 
     def _remember_order(self, symbol, order, options, side):
         key = self.execution_key(symbol, order['orderId'])
@@ -62,6 +72,8 @@ class DurableExecution:
         result, seen = [], set()
         for _ in range(ec['trade_max_pages']):
             page = await self._request('GET', '/fapi/v1/userTrades', params, retry=True)
+            if not isinstance(page, list) or any(not isinstance(f, dict) for f in page):
+                raise ValueError('Invalid execution-details schema')
             for i, fill in enumerate(page):
                 identity = str(fill.get('id', i))
                 if identity not in seen and str(fill.get('orderId', order_id)) == str(order_id):
@@ -81,17 +93,28 @@ class DurableExecution:
             if trade.get('accounting_status') == 'complete': continue
             try:
                 fills = await self.order_fills(self.raw(record['symbol']), record['order']['orderId'])
-            except ExchangeError:
+                # Missing, malformed and partial accounting are not evidence
+                # against an order that Binance already confirmed FILLED.
+                unique = {str(f.get('id', i)): f for i, f in enumerate(fills)}
+                fills = list(unique.values())
+                if not fills or any(f['commissionAsset'] != 'USDT' for f in fills): continue
+                quantities = [Decimal(str(f['qty'])) for f in fills]
+                commissions = [Decimal(str(f['commission'])) for f in fills]
+                realized = [Decimal(str(f['realizedPnl'])) for f in fills]
+                if not all(v.is_finite() for v in quantities + commissions + realized) or any(v <= 0 for v in quantities):
+                    raise ValueError('Invalid numeric execution details')
+                if not math.isclose(float(sum(quantities)), trade['amount'], rel_tol=self.cfg['exchange']['fill_qty_tolerance_pct']): continue
+                fee, pnl = sum(commissions, Decimal(0)), sum(realized, Decimal(0))
+                if not math.isfinite(float(fee)) or not math.isfinite(float(pnl)): raise ValueError('Invalid accounting totals')
+            except (ExchangeError, KeyError, ValueError, TypeError, InvalidOperation) as error:
+                if not record.get('accounting_pending_reason'):
+                    record['accounting_pending_reason'] = 'execution_details_unavailable'
+                    self.journal.log('accounting_pending', symbol=record['symbol'], stage='execution_details',
+                        order_id=record['order']['orderId'], error_type=type_name(error),
+                        recovery_action='retain_fill_and_protection_retry_accounting')
+                    self._flush_executions()
                 continue
-            # Endpoint may return a stale/partial page. Do not finalize estimates.
-            unique = {str(f.get('id', i)): f for i, f in enumerate(fills)}
-            fills = list(unique.values())
-            if not fills or any(f['commissionAsset'] != 'USDT' for f in fills): continue
-            quantity = sum(float(f['qty']) for f in fills)
-            if not math.isclose(quantity, trade['amount'], rel_tol=self.cfg['exchange']['fill_qty_tolerance_pct']): continue
-            from decimal import Decimal
-            fee = sum((Decimal(f['commission']) for f in fills), Decimal(0))
-            pnl = sum((Decimal(f['realizedPnl']) for f in fills), Decimal(0))
+            record.pop('accounting_pending_reason', None)
             trade.update(fee_usdt=float(fee), pnl_usdt=float(pnl), fee_exact=str(fee),
                          realized_pnl_exact=str(pnl), accounting_status='complete',
                          execution_ids=[str(f.get('id', i)) for i, f in enumerate(fills)])
@@ -103,6 +126,14 @@ class DurableExecution:
                 # Actual entry fees can exceed the configured estimate. Tighten
                 # risk distance only; never loosen a dynamic stop.
                 pos = record['position']
+                entry_qty = record.get('entry_facts', {}).get('amount', pos['amount'])
+                closed_qty = sum(t['amount'] for t in self.trades if t.get('reduceOnly') and t.get('signal_id') == pos['signal_id'])
+                if closed_qty >= entry_qty or math.isclose(closed_qty, entry_qty, rel_tol=self.cfg['exchange']['fill_qty_tolerance_pct']):
+                    # Historical exact fees still matter for PnL. Rebuilding
+                    # protection risk for an already closed entry does not.
+                    self._flush_executions()
+                    self._upsert_trade(trade)
+                    continue
                 options = record['options']
                 cfg = copy.deepcopy(options.get('risk_cfg', self.cfg))
                 cfg['tp_sl'].update(mmr=pos['mmr'], maintenance_amount=pos['maintenance_amount'], quantity=pos['amount'])
@@ -131,6 +162,7 @@ class DurableExecution:
             self._upsert_trade(trade)
 
     async def _accept_fill(self, symbol, order, options, side, recovered=False, facts_only=False):
+        self.execution_stage = 'fill_persistence'
         record = self._remember_order(symbol, order, options, side)
         order = record['order']
         actual, filled = float(order.get('avgPrice', 0)), float(order.get('executedQty', 0))
@@ -211,7 +243,7 @@ class DurableExecution:
             opening = None
             for prior in reversed(list(self.executions.values())):
                 if prior['symbol'] != symbol: continue
-                candidate = prior.get('position') or prior.get('entry_facts')
+                candidate = {**(prior.get('position') or {}), **(prior.get('entry_facts') or {})}
                 if not candidate: continue
                 sid = candidate['signal_id']
                 if options.get('signal_id') and options['signal_id'] != sid: continue
@@ -234,12 +266,17 @@ class DurableExecution:
         self._flush_executions()
         self._upsert_trade(trade)
         if not reducing:
-            remote = [p for p in await self.get_position(symbol) if float(p['positionAmt']) != 0]
+            self.execution_stage = 'position_visibility'
+            remote = []
+            for attempt in range(self.cfg['exchange']['order_poll_attempts'] + 1):
+                remote = [p for p in await self.get_position(symbol) if float(p['positionAmt']) != 0]
+                if remote and float(remote[0].get('liquidationPrice', 0)) > 0: break
+                if attempt < self.cfg['exchange']['order_poll_attempts']:
+                    await asyncio.sleep(self.cfg['exchange']['order_poll_sec'])
             if remote:
-                liquidation = float(remote[0]['liquidationPrice'])
-                margin = self.cfg['tp_sl']['liq_safety_margin']
-                safe = pos['sl'] > liquidation * (1 + margin) if side == 'buy' else pos['sl'] < liquidation * (1 - margin)
-                if liquidation <= 0 or not safe: raise ExecutionUnknown()
+                self.execution_stage = 'liquidation_validation'
+                self.constrain_actual_liquidation(symbol, pos, remote[0])
+                self._flush_executions()
                 await self.protect(symbol, pos)
                 trade['actual_protection'] = copy.deepcopy(pos['protection'])
                 trade['protection_status'] = 'confirmed'
@@ -248,6 +285,7 @@ class DurableExecution:
                 self._upsert_trade(trade)
             elif not recovered:
                 raise ExecutionUnknown()
+        self.execution_stage = 'accounting'
         await self.sync_accounting()
         if not reducing and pos and any(float(p['positionAmt']) != 0 for p in await self.get_position(symbol)):
             await self.protect(symbol, pos)
@@ -282,6 +320,7 @@ class DurableExecution:
                 await self._accept_fill(intent['symbol'], order, options, intent['side'], recovered=True, facts_only=self.emergency_mode)
             if order.get('status') not in TERMINAL: unresolved = True
         await self.sync_accounting()
+        if not self.emergency_mode and not await self.recover_protection_intents(): unresolved = True
         return not unresolved
 
     async def settle_before_close(self, symbol):
@@ -303,6 +342,7 @@ class DurableExecution:
                 await self._accept_fill(symbol, order, intent.get('params', {}), intent['side'], recovered=True, facts_only=True)
 
     async def create_order(self, symbol, type, side, amount, params=None):
+        self.execution_stage = 'before_post_validation'
         previous_ids = set(self.intents)
         try:
             return await self._create_order(symbol, type, side, amount, params)
@@ -314,7 +354,9 @@ class DurableExecution:
                     error_type=type_name(error), reason=str(error), recovery_action='no_order_sent')
                 raise
             latest = next((i for cid, i in reversed(list(self.intents.items())) if cid in current_ids), {})
-            if isinstance(error, OrderRejected):
+            if self.storage_fault or self.journal.failed:
+                self.execution_fault = 'storage_failure'
+            elif isinstance(error, OrderRejected):
                 self.execution_fault = ('close_rejected' if reducing else
                     'protection_rejected' if latest.get('type') in ('STOP_MARKET', 'TAKE_PROFIT_MARKET') else 'order_rejected')
             elif isinstance(error, OrderValidationError):
@@ -325,10 +367,16 @@ class DurableExecution:
                              and r.get('trade') and r['order'].get('clientOrderId') in current_ids), None)
             if affected:
                 affected['trade']['emergency'] = True
-                if not affected['trade']['reduceOnly']: affected['trade']['protection_status'] = 'failed'
+                if not affected['trade']['reduceOnly']:
+                    if self.execution_stage.startswith(('protection_', 'liquidation_', 'position_')):
+                        affected['trade']['protection_status'] = 'failed'
+                    if self.execution_fault == 'order_execution_uncertain' and affected['order'].get('status') in TERMINAL:
+                        self.execution_fault = 'entry_confirmed_management_failed'
+                elif self.execution_fault == 'order_execution_uncertain' and affected['order'].get('status') in TERMINAL:
+                    self.execution_fault = 'close_confirmed_reconciliation_failed'
                 self._upsert_trade(affected['trade'])
             latest = next((i for i in reversed(list(self.intents.values())) if i['symbol'] == symbol), {})
-            self.journal.log('order_execution_failed', symbol=symbol, stage='execution',
+            self.journal.log('order_execution_failed', symbol=symbol, stage=self.execution_stage,
                 order_id=latest.get('order_id'), client_order_id=latest.get('params', {}).get('newClientOrderId'),
                 error_type=type_name(error), http_status=getattr(error, 'status', 0),
                 exchange_error_code=getattr(error, 'code', 0),
@@ -371,12 +419,16 @@ class DurableExecution:
             options.update(leverage=leverage, risk_cfg=risk_cfg, equity=self.equity, brackets=self.brackets.get(symbol))
             expected = float(options.get('expected_price') or (await self.fetch_ticker(symbol))['last'])
             options['expected_price'] = expected
-            make_position(side, expected, amount, leverage,
-                options.get('exit_atr', expected * self.cfg['atr']['fallback_atr_pct']), risk_cfg, self.equity, self.fee_rate)
+            try:
+                planned = make_position(side, expected, amount, leverage,
+                    options.get('exit_atr', expected * self.cfg['atr']['fallback_atr_pct']), risk_cfg, self.equity, self.fee_rate)
+            except (ValueError, RuntimeError):
+                raise OrderValidationError('risk_levels_unavailable_before_entry') from None
+            self.validate_initial_protection(symbol, planned)
             market = self.market(symbol)
             validate_quantity(market, self.amount_to_precision(symbol, amount), expected)
             if amount * expected / leverage + amount * expected * self.fee_rate > self.free:
-                raise ValueError('Insufficient actual available margin including entry fee')
+                raise OrderValidationError('insufficient_available_margin_including_fee')
         else:
             remote = [p for p in await self.get_position(symbol) if float(p['positionAmt']) != 0]
             if not remote: raise ExecutionUnknown()
@@ -385,8 +437,10 @@ class DurableExecution:
             maximum = self.market(symbol)['limits']['amount'].get('max', float('inf'))
             amount = min(amount, abs(residual), maximum)
             validate_quantity(self.market(symbol), self.amount_to_precision(symbol, amount))
+        self.execution_stage = 'close_post' if options.get('reduceOnly') else 'entry_post'
         result = await safe_create_order(self, {'symbol': symbol, 'type': type, 'side': side, 'amount': amount, 'params': options}, self.journal)
         self._remember_order(symbol, result, options, side)
+        self.execution_stage = 'fill_settlement'
         try:
             result = await self.settle_fill(symbol, result)
         except ExecutionUnknown:
@@ -395,7 +449,9 @@ class DurableExecution:
                 await self._accept_fill(symbol, latest, options, side)
             raise
         trade = await self._accept_fill(symbol, result, options, side)
+        self.execution_stage = 'account_refresh_after_fill'
         await self.refresh_account()
+        self.execution_stage = 'close_remaining_confirmation' if options.get('reduceOnly') else 'entry_complete'
         if options.get('reduceOnly') and symbol in self.positions: raise ExecutionUnknown()
         return trade
 

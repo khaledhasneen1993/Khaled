@@ -14,7 +14,7 @@ import math
 import os
 import time
 from datetime import datetime, timezone
-from decimal import Decimal, ROUND_DOWN, ROUND_UP
+from decimal import Decimal, ROUND_DOWN, ROUND_UP, ROUND_FLOOR, ROUND_CEILING
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -100,14 +100,20 @@ class LiveExchange(DurableExecution, PaperExchange):
         self.storage_fault = False
 
     def write_state(self, path, value):
+        path = Path(path)
+        digest = hashlib.sha256(json.dumps(value, sort_keys=True, allow_nan=False).encode()).digest()
+        if not hasattr(self, '_state_digests'): self._state_digests = {}
+        if self._state_digests.get(path) == digest and path.exists(): return
         try:
             atomic_json(path, value)
         except OSError:
             self.storage_fault = True
             self.execution_fault = 'storage_failure'
             if not self.emergency_mode: raise
-            # Emergency reducing operations retain stable IDs in memory. Disk
-            # durability is impossible until storage recovers; never claim it.
+            # Stable IDs remain in memory during emergency reducing operations;
+            # disk durability is impossible until storage recovers.
+        else:
+            self._state_digests[path] = digest
 
     def clear_active_protection(self, symbol, signal_id=None):
         pos = self.pending_protection.get(symbol)
@@ -126,12 +132,22 @@ class LiveExchange(DurableExecution, PaperExchange):
         self.intents[client_id] = {'symbol': params['symbol'], 'type': params['type'],
             'side': params['side'], 'amount': params['amount'],
             'params': {k: v for k, v in params['params'].items() if k in
-                       ('reduceOnly', 'expected_price', 'exit_atr', 'atr_source', 'stopPrice', 'round_up', 'newClientOrderId', 'signal_id', 'leverage', 'risk_cfg', 'equity', 'brackets', 'exit_reason', 'exit_position')},
+                       ('reduceOnly', 'expected_price', 'exit_atr', 'atr_source', 'stopPrice', 'round_up', 'newClientOrderId', 'signal_id', 'leverage', 'risk_cfg', 'equity', 'brackets', 'exit_reason', 'exit_position', 'protection_role', 'replaces')},
             'status': 'pending'}
         self.write_state(self.intent_path, self.intents)
-        self.journal.log('order_intent_saved', stage='before_post', symbol=params['symbol'], client_order_id=client_id, recovery_action='query_same_id')
+        logged = self.journal.log('order_intent_saved', stage='before_post', symbol=params['symbol'], client_order_id=client_id, recovery_action='query_same_id')
+        if logged is False and not self.emergency_mode:
+            self.storage_fault = True
+            self.execution_fault = 'storage_failure'
+            raise OSError('Operational journal unavailable before submission')
 
     def resolve_intent(self, client_id, result):
+        intent = self.intents[client_id]
+        algo = intent['type'] in ('STOP_MARKET', 'TAKE_PROFIT_MARKET')
+        identity, client_key = ('algoId', 'clientAlgoId') if algo else ('orderId', 'clientOrderId')
+        if (not isinstance(result, dict) or not str(result.get(identity, '')).isdigit()
+                or int(result[identity]) <= 0 or result.get(client_key) != client_id):
+            raise ExecutionUnknown()
         self.intents[client_id]['status'] = 'observed'
         self.intents[client_id]['order_id'] = result.get('orderId', result.get('algoId'))
         self.intents[client_id]['response'] = result
@@ -155,7 +171,9 @@ class LiveExchange(DurableExecution, PaperExchange):
         return {**value, 'signature': signature}
 
     async def _request(self, method, path, params=None, signed=True, retry=False):
+        clock_recovered = False
         async def once():
+            nonlocal clock_recovered
             delay = self._blocked_until - time.monotonic()
             if delay > 0: await asyncio.sleep(delay)
             await self.rl.acquire()
@@ -175,9 +193,18 @@ class LiveExchange(DurableExecution, PaperExchange):
             try:
                 data = response.json()
             except ValueError:
-                data = {}
+                sanitized = ExchangeError(response.status_code)
+                sanitized.protocol_error = True
+                if self.on_api_error: self.on_api_error()
+                raise sanitized from None
             if response.status_code >= 400 or isinstance(data, dict) and int(data.get('code', 0)) < 0:
                 code = data.get('code', 0) if isinstance(data, dict) else 0
+                # Clock recovery is a GET-only operation. A mutating request is
+                # always recovered by its durable intent, never retried here.
+                if code == -1021 and signed and method == 'GET' and not clock_recovered:
+                    clock_recovered = True
+                    await self.sync_time()
+                    return await once()
                 expected_limit = path == '/fapi/v1/leverage' and code in self.cfg['exchange']['leverage_rejection_codes']
                 if self.on_api_error and not expected_limit and code not in self.cfg['exchange']['non_incident_error_codes']:
                     self.on_api_error()
@@ -188,7 +215,8 @@ class LiveExchange(DurableExecution, PaperExchange):
                     self._blocked_until = max(self._blocked_until, time.monotonic() + after)
                 raise ExchangeError(response.status_code, data.get('code', 0) if isinstance(data, dict) else 0, after)
             return data
-        return await with_backoff(once) if retry else await once()
+        return await with_backoff(once, max_retries=self.cfg['exchange']['max_retries'],
+                                  base=self.cfg['exchange']['backoff_base']) if retry and method == 'GET' else await once()
 
     async def sync_time(self):
         start = time.time() * 1000
@@ -262,15 +290,19 @@ class LiveExchange(DurableExecution, PaperExchange):
         data = await self._request('GET', '/fapi/v3/account', retry=True)
         # Restrict accounting to the USDT collateral asset.
         asset = next(a for a in data['assets'] if a['asset'] == 'USDT')
-        self.balance = float(asset['walletBalance'])
-        self._equity = float(asset['marginBalance'])
-        self._free = float(asset['availableBalance'])
-        self._used = float(asset['initialMargin'])
+        values = [float(asset[k]) for k in ('walletBalance', 'marginBalance', 'availableBalance', 'initialMargin')]
+        if not all(math.isfinite(v) for v in values): raise ValueError('Invalid Binance balance snapshot')
         remote = await self.get_position(None)
-        self.positions = {self.symbol(p['symbol']): {'side': 'buy' if float(p['positionAmt']) > 0 else 'sell',
+        positions = {self.symbol(p['symbol']): {'side': 'buy' if float(p['positionAmt']) > 0 else 'sell',
             'entry': float(p['entryPrice']), 'amount': abs(float(p['positionAmt'])),
             'margin': float(p.get('positionInitialMargin', 0)), 'remote': p}
             for p in remote if float(p['positionAmt']) != 0}
+        if any(not all(math.isfinite(p[k]) and p[k] > 0 for k in ('entry', 'amount')) for p in positions.values()):
+            raise ValueError('Invalid Binance position snapshot')
+        # Commit a complete pair of reads; a failed position read must not leave
+        # new balances beside positions from the previous observation.
+        self.balance, self._equity, self._free, self._used = values
+        self.positions = positions
         return data
 
     async def fetch_balance(self):
@@ -377,6 +409,7 @@ class LiveExchange(DurableExecution, PaperExchange):
         """Create-confirm-before-cancel: no unsupported atomic STOP amendment."""
         side = 'sell' if pos['side'] == 'buy' else 'buy'
         for name, kind, target in (('sl', 'STOP_MARKET', pos['sl']), ('tp', 'TAKE_PROFIT_MARKET', pos['tp'])):
+            self.execution_stage = 'protection_' + name
             old = pos.get('protection', {}).get(name)
             # Stop rounds toward entry; TP rounds away, preserving planned RR.
             round_up = pos['side'] == 'buy'
@@ -387,33 +420,112 @@ class LiveExchange(DurableExecution, PaperExchange):
             trigger = self._price(symbol, target, round_up)
             if old and old['trigger'] == trigger and old.get('amount') == pos['amount']: continue
             result = await safe_create_order(self, {'symbol': symbol, 'type': kind, 'side': side,
-                'amount': pos['amount'], 'params': {'reduceOnly': True, 'stopPrice': float(trigger), 'round_up': round_up}}, self.journal)
+                'amount': pos['amount'], 'params': {'reduceOnly': True, 'stopPrice': float(trigger), 'round_up': round_up,
+                'signal_id': pos['signal_id'], 'protection_role': name, 'replaces': copy.deepcopy(old)}}, self.journal)
             client_id = result['clientAlgoId']
             confirmed = await self.query_order_by_client_id(symbol, client_id)
-            expected_qty = Decimal(self.amount_to_precision(symbol, pos['amount']))
-            if (not confirmed or confirmed.get('algoStatus') != 'NEW'
-                    or confirmed.get('clientAlgoId') != client_id
-                    or str(confirmed.get('algoId')) != str(result['algoId'])
-                    or confirmed.get('symbol') != self.raw(symbol)
-                    or confirmed.get('side') != side.upper()
-                    or confirmed.get('orderType') != kind
-                    or confirmed.get('reduceOnly') not in (True, 'true')
-                    or Decimal(str(confirmed.get('quantity', 0))) != expected_qty
-                    or Decimal(str(confirmed.get('triggerPrice', 0))) != Decimal(trigger)):
-                raise ExecutionUnknown()
-            new = {'orderId': result['algoId'], 'clientOrderId': client_id, 'trigger': trigger, 'is_algo': True, 'amount': pos['amount']}
-            pos.setdefault('protection', {})[name] = new
-            # Persist new protection before removing any old order.
-            self.pending_protection[symbol] = pos
-            self.write_state(self.intent_path.parent / 'protection.json', self.pending_protection)
-            for record in self.executions.values():
-                if record['symbol'] == symbol and record.get('position', {}).get('signal_id') == pos['signal_id']:
-                    record['position'] = dict(pos)
-            self._flush_executions()
-            if old:
-                try: await self.cancel_algo(old)
-                except ExchangeError as error:
-                    if error.code not in (-2011, -2013): raise
+            self.verify_protection(symbol, pos, name, confirmed, client_id, result['algoId'], trigger)
+            await self.commit_protection(symbol, pos, name, confirmed, trigger, old)
+
+    def verify_protection(self, symbol, pos, name, confirmed, client_id, order_id, trigger):
+        kind = 'STOP_MARKET' if name == 'sl' else 'TAKE_PROFIT_MARKET'
+        side = 'SELL' if pos['side'] == 'buy' else 'BUY'
+        if (not confirmed or confirmed.get('algoStatus') != 'NEW'
+                or confirmed.get('clientAlgoId') != client_id
+                or str(confirmed.get('algoId')) != str(order_id)
+                or confirmed.get('symbol') != self.raw(symbol)
+                or confirmed.get('side') != side or confirmed.get('orderType') != kind
+                or confirmed.get('reduceOnly') not in (True, 'true')
+                or Decimal(str(confirmed.get('quantity', 0))) != Decimal(self.amount_to_precision(symbol, pos['amount']))
+                or Decimal(str(confirmed.get('triggerPrice', 0))) != Decimal(trigger)):
+            raise ExecutionUnknown()
+
+    async def commit_protection(self, symbol, pos, name, confirmed, trigger, old):
+        client_id = confirmed['clientAlgoId']
+        pos.setdefault('protection', {})[name] = {'orderId': confirmed['algoId'],
+            'clientOrderId': client_id, 'trigger': trigger, 'is_algo': True, 'amount': pos['amount']}
+        self.pending_protection[symbol] = pos
+        self.write_state(self.intent_path.parent / 'protection.json', self.pending_protection)
+        for record in self.executions.values():
+            if record['symbol'] == symbol and record.get('position', {}).get('signal_id') == pos['signal_id']:
+                self.merge_strategy_position(record['position'], pos, protection=True)
+        self._flush_executions()
+        self.intents[client_id]['protection_committed'] = True
+        self.write_state(self.intent_path, self.intents)
+        # Every durable replacement reference is committed before DELETE.
+        if old and old['clientOrderId'] != client_id:
+            try: await self.cancel_algo(old)
+            except ExchangeError as error:
+                if error.code not in (-2011, -2013): raise
+
+    async def recover_protection_intents(self):
+        unresolved = False
+        for client_id, intent in list(self.intents.items()):
+            if intent['type'] == 'market' or intent['status'] == 'rejected' or intent.get('protection_committed'):
+                continue
+            symbol, options = intent['symbol'], intent.get('params', {})
+            pos = next((r['position'] for r in reversed(list(self.executions.values()))
+                        if r['symbol'] == symbol and r.get('position') and
+                        (not options.get('signal_id') or options['signal_id'] == r['position']['signal_id'])), None)
+            known = pos and any(o['clientOrderId'] == client_id for o in pos.get('protection', {}).values())
+            if known and intent['status'] == 'observed':
+                intent['protection_committed'] = True
+                self.write_state(self.intent_path, self.intents)
+                continue
+            confirmed = await self.query_order_by_client_id(symbol, client_id)
+            if not confirmed:
+                unresolved = True
+                continue
+            self.resolve_intent(client_id, confirmed)
+            active = any(float(p['positionAmt']) != 0 for p in await self.get_position(symbol))
+            if not active or confirmed.get('algoStatus') in ('FINISHED', 'CANCELED', 'EXPIRED', 'REJECTED'):
+                # Native fills and flat-account orphan cleanup are reconciled by
+                # their actual child order/remaining position, never a new POST.
+                intent['protection_committed'] = True
+                self.write_state(self.intent_path, self.intents)
+                continue
+            if not pos:
+                unresolved = True
+                continue
+            name = options.get('protection_role') or ('sl' if intent['type'] == 'STOP_MARKET' else 'tp')
+            trigger = self._price(symbol, options['stopPrice'], options['round_up'])
+            self.verify_protection(symbol, pos, name, confirmed, client_id, confirmed['algoId'], trigger)
+            old = options.get('replaces') or pos.get('protection', {}).get(name)
+            if name == 'sl' and old:
+                sm = 1 if pos['side'] == 'buy' else -1
+                if sm * (float(trigger) - float(old['trigger'])) < 0:
+                    unresolved = True
+                    continue
+            await self.commit_protection(symbol, pos, name, confirmed, trigger, old)
+        return not unresolved
+
+    def validate_initial_protection(self, symbol, pos):
+        entry = Decimal(str(pos['entry']))
+        stop = Decimal(self._price(symbol, pos['sl'], pos['side'] == 'buy'))
+        target = Decimal(self._price(symbol, pos['tp'], pos['side'] == 'buy'))
+        sm = 1 if pos['side'] == 'buy' else -1
+        if stop <= 0 or target <= 0 or sm * (entry - stop) <= 0 or sm * (target - entry) <= 0:
+            raise OrderValidationError('protection_unavailable_at_price_tick')
+
+    def constrain_actual_liquidation(self, symbol, pos, actual):
+        """Tighten to Binance's actual boundary; never expand a loss budget."""
+        liquidation = Decimal(str(actual.get('liquidationPrice', 0)))
+        if not liquidation.is_finite() or liquidation <= 0: raise ExecutionUnknown()
+        sm = 1 if pos['side'] == 'buy' else -1
+        buffer = Decimal(str(self.cfg['tp_sl']['liq_safety_margin']))
+        boundary = liquidation * (1 + sm * buffer)
+        tick = Decimal(self.market(symbol)['tick'])
+        stop = Decimal(self._price(symbol, pos['sl'], sm == 1))
+        if sm * (stop - boundary) <= 0:
+            rounding = ROUND_FLOOR if sm == 1 else ROUND_CEILING
+            stop = ((boundary / tick).to_integral_value(rounding=rounding) + sm) * tick
+        reference = Decimal(str(actual.get('markPrice') or self.prices.get(symbol, pos['entry'])))
+        if not reference.is_finite() or reference <= 0 or sm * (reference - stop) <= 0:
+            raise ExecutionUnknown()
+        if sm * (stop - Decimal(str(pos['sl']))) > 0:
+            pos['sl'] = float(stop)
+            pos['risk_capped'] = True
+        pos['liquidation_price'] = float(liquidation)
 
     async def get_funding_rate(self, symbol):
         return await self._request('GET', '/fapi/v1/premiumIndex', {'symbol': self.raw(symbol)}, signed=False, retry=True)

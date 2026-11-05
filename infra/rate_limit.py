@@ -39,7 +39,8 @@ async def with_backoff(coro_fn, max_retries=None, base=None):
             return await coro_fn()
         except Exception as error:
             status = getattr(error, 'status', getattr(getattr(error, 'response', None), 'status_code', 0))
-            if status not in (429, 418) and not 500 <= status < 600:
+            transient = bool(getattr(error, 'transport_error_type', None) or getattr(error, 'protocol_error', False))
+            if not transient and status not in (429, 418) and not 500 <= status < 600:
                 raise
             if attempt == retries - 1:
                 raise

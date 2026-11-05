@@ -30,8 +30,9 @@ async def reconcile(exchange, state, journal):
         entry_diff = abs(pos['entry'] - entry) > cfg['entry_tolerance_pct'] * entry
         if qty_diff or entry_diff or direction(pos['side']) != direction(expected_side):
             report['size_mismatches'].append(symbol)
-            # Update remote facts without silently loosening/replacing TP/SL.
-            pos.update(amount=qty, entry=entry, side=expected_side)
+            # Execution facts are immutable here. The live account snapshot
+            # already contains the remaining quantity used for emergency closes.
+            # Mutating the entry quantity would corrupt final accounting.
             journal.log('position_mismatch', symbol=symbol)
     owned = {o['clientOrderId'] for pos in local.values() for o in pos.get('protection', {}).values()}
     owned |= {o['clientOrderId'] for o in state.open_orders.values()}

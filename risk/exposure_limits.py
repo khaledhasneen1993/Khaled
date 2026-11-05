@@ -22,7 +22,7 @@ def directional_exposure(state):
 
 
 def can_open(state, symbol, side, new_notional, cfg):
-    if state.equity <= 0 or not math.isfinite(new_notional) or new_notional <= 0:
+    if not math.isfinite(state.equity) or state.equity <= 0 or not math.isfinite(new_notional) or new_notional <= 0:
         return False, 'invalid_equity_or_notional'
     if len(state.open_positions) >= cfg['max_concurrent']:
         return False, 'max_positions'

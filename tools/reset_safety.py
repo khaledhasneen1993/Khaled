@@ -11,6 +11,33 @@ from risk.kill_switch import KillSwitch
 from risk.config import load_config
 
 
+def reviewed_reset_state(data, root, cfg):
+    """Clear the reviewed latch, preserving risk history and pending evidence."""
+    if data['account_positions'] or data['strategy_positions']:
+        raise ValueError('Positions remain in saved state; reconcile and review first')
+    intents_path, executions_path = root / 'order_intents.json', root / 'executions.json'
+    intents = json.loads(intents_path.read_text()) if intents_path.exists() else {}
+    executions = json.loads(executions_path.read_text()) if executions_path.exists() else {}
+    terminal = {'FILLED', 'EXPIRED', 'CANCELED', 'REJECTED', 'EXPIRED_IN_MATCH'}
+    for intent in intents.values():
+        if intent['status'] == 'rejected': continue
+        key = intent['symbol'] + ':' + str(intent.get('order_id'))
+        record = executions.get(key)
+        if intent['status'] == 'pending' or intent['type'] == 'market' and (
+                not record or record['order'].get('status') not in terminal):
+            raise ValueError('Unresolved order intent remains; restore it before reset')
+    if any(r.get('trade', {}).get('accounting_status') == 'pending' for r in executions.values()):
+        raise ValueError('Pending accounting remains; restore exact executions before reset')
+    kill = KillSwitch(cfg['kill_switch'])
+    kill.restore(data['operations']['kill'])
+    kill.roll_day(data.get('equity_usdt'))
+    kill.triggered = None
+    data['operations']['kill'] = kill.dump()
+    data['operations']['announced_kill'] = False
+    data['operations']['storage_failed'] = False
+    return data
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--state', required=True)
@@ -22,18 +49,13 @@ def main():
         try: fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError: parser.error('Stop the running account process before reset')
         data = json.loads(path.read_text())
-        if data['account_positions'] or data['strategy_positions']:
-            parser.error('Positions remain in the saved state; reconcile/flatten and review first')
         cfg = load_config()
-        kill = KillSwitch(cfg['kill_switch'])
-        kill.reset_daily()
-        data['operations']['kill'] = kill.dump()
-        data['operations']['announced_kill'] = False
-        data['operations']['storage_failed'] = False  # Atomic save below must succeed; no reset on write failure.
+        try: data = reviewed_reset_state(data, path.parent, cfg)
+        except ValueError as error: parser.error(str(error))
         atomic_json(path, data)
         atomic_json(path.parent / cfg['exchange']['session_guard_filename'], {'active': False, 'reviewed': True})
         OperationalJournal(path.parent / 'journal').log('kill_manual_reset')
-    print('Local latch reset. Startup reconciliation and all other gates still apply.')
+    print('Reviewed local latch reset. Risk counters retained; startup reconciliation and risk gates still apply.')
 
 
 if __name__ == '__main__':

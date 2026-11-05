@@ -1,4 +1,5 @@
 import time
+import math
 from collections import deque
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -22,9 +23,19 @@ class KillSwitch:
         self.day = datetime.now(timezone.utc).date().isoformat()
         self.day_start_equity = None
 
-    def on_trade_closed(self, pnl: float):
-        self.state.daily_pnl += pnl
+    def on_trade_closed(self, pnl: float, closed_at=None):
+        self.roll_day()
+        closed_day = datetime.fromisoformat(closed_at).astimezone(timezone.utc).date().isoformat() if closed_at else self.day
+        if closed_day == self.day: self.state.daily_pnl += pnl
         self.state.consecutive_losses = self.state.consecutive_losses + 1 if pnl < 0 else 0
+
+    def roll_day(self, equity=None):
+        day = datetime.now(timezone.utc).date().isoformat()
+        if day != self.day:
+            self.day = day
+            self.state.daily_pnl = 0.
+            self.day_start_equity = equity
+        # Never reset the latch, loss streak, API window or WS age at midnight.
 
     def on_ws_heartbeat(self):
         self.state.last_ws_heartbeat = time.time()
@@ -52,9 +63,13 @@ class KillSwitch:
 
     def check(self, state, market):
         self._prune()
+        equity = float(state.equity)
+        self.roll_day(equity)
         if self.triggered:
             return self.triggered
-        equity = float(state.equity)
+        if not math.isfinite(equity) or equity <= 0:
+            self.triggered = 'invalid_equity'
+            return self.triggered
         if self.day_start_equity is None:
             self.day_start_equity = equity
         # Include unrealized losses; compare with a stable daily starting equity.

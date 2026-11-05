@@ -178,6 +178,8 @@ class CascadeHunter:
                 cfg = getattr(self, "cfg", None) or load_config()
                 atr, source = await self.exit_atr(symbol, price)
                 if "stop_initial" not in pos:
+                    if getattr(self, 'execution_mode', 'paper') != 'paper':
+                        raise RuntimeError('Live legacy position requires explicit execution recovery')
                     # Upgrade pre-feature saved positions before their first exit check.
                     account = self.exchange.positions[symbol]
                     opening = next((t for t in reversed(self.exchange.trades)
@@ -221,6 +223,7 @@ class CascadeHunter:
                     log.info(f"EXIT {reason} {symbol} @ {price:.4f}")
                     to_remove.append(symbol)
             except Exception as e:
+                if getattr(self, 'execution_mode', 'paper') != 'paper': raise
                 log.error(f"Exit check failed {symbol}: {e}")
 
         for s in to_remove:
@@ -235,7 +238,14 @@ class CascadeHunter:
                     await self.manage_exits()
                 await asyncio.sleep(8)
             except Exception as e:
-                log.error(f"Exit watcher error: {e}")
+                if getattr(self, 'execution_mode', 'paper') != 'paper':
+                    from infra.errors import diagnostic_fields
+                    async with self.lock:
+                        await self.safety.event('exit_monitor_exception', 'critical', stage='exit_management',
+                            recovery_action='latch_and_reconcile', **diagnostic_fields(e))
+                        await self.safety.trip('exit_monitor_failure')
+                else:
+                    log.error(f"Exit watcher error: {e}")
                 await asyncio.sleep(15)
 
 

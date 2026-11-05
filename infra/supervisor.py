@@ -95,7 +95,8 @@ class SafetySupervisor:
         if key in self.accounted_closes: return
         self.accounted_closes.add(key)
         detail = trade['exit_detail']
-        self.kill.on_trade_closed(detail['net_pnl_usdt'])
+        self.kill.roll_day(self.bot.exchange.equity)
+        self.kill.on_trade_closed(detail['net_pnl_usdt'], trade.get('exit_time', trade.get('timestamp')))
         self.save_safely()
         await self.event('trade_closed', symbol=trade['symbol'], reason=detail['exit_reason'], pnl=detail['net_pnl_usdt'])
         if self.kill.check(self.bot.exchange, None):
@@ -141,15 +142,19 @@ class SafetySupervisor:
         # Repeat while latched. Failed flattening never removes remaining stops.
         remaining_orders = []
         for _ in range(self.cfg['kill_switch']['flatten_attempts']):
+            flatten_stage = 'kill_account_refresh'
             try:
                 if self.live:
                     await self.bot.exchange.refresh_account()
                 for symbol in list(self.bot.exchange.positions):
                     try:
                         await self.bot.close_position(symbol, 'kill_switch')
-                    except Exception:
-                        await self.event('kill_close_failed', 'critical', symbol=symbol)
+                    except Exception as error:
+                        await self.event('kill_close_failed', 'critical', symbol=symbol,
+                            stage=getattr(self.bot.exchange, 'execution_stage', 'close'),
+                            recovery_action='query_orders_and_remaining_position', **diagnostic_fields(error))
                 if self.live:
+                    flatten_stage = 'kill_order_cleanup'
                     for order in await self.bot.exchange.get_open_orders():
                         # Retain protective reduce-only orders if flatten failed.
                         symbol = self.bot.exchange.symbol(order['symbol'])
@@ -159,8 +164,11 @@ class SafetySupervisor:
                         try:
                             if order.get('is_algo'): await self.bot.exchange.cancel_algo(order)
                             else: await self.bot.exchange.cancel_order(order['symbol'], order_id=order['orderId'])
-                        except Exception:
-                            await self.event('kill_cancel_failed', 'critical', symbol=symbol)
+                        except Exception as error:
+                            await self.event('kill_cancel_failed', 'critical', symbol=symbol,
+                                stage='cancel_protection' if order.get('is_algo') else 'cancel_order',
+                                recovery_action='recheck_open_orders', **diagnostic_fields(error))
+                    flatten_stage = 'kill_account_verify'
                     await self.bot.exchange.refresh_account()
                     remaining_orders = await self.bot.exchange.get_open_orders()
                 if not self.bot.exchange.positions and not remaining_orders:
@@ -170,14 +178,17 @@ class SafetySupervisor:
                             self.bot.merge_execution_state()
                             self.bot.persist_execution_metadata()
                             await self.bot._drain_notifications()
-                        except Exception:
-                            await self.event('kill_accounting_pending', 'warning')
+                        except Exception as error:
+                            await self.event('kill_accounting_pending', 'warning', stage='kill_accounting_recovery',
+                                recovery_action='retain_ledger_for_recovery', **diagnostic_fields(error))
+                    flatten_stage = 'kill_local_close_adoption'
                     for symbol in list(self.bot.positions):
                         if not await self.bot.adopt_native_close(symbol):
                             await self.event('kill_phantom_retained', 'warning', symbol=symbol)
                     break
-            except Exception:
-                await self.event('kill_exchange_unreachable', 'critical', reason=reason)
+            except Exception as error:
+                await self.event('kill_exchange_unreachable', 'critical', reason=reason, stage=flatten_stage,
+                    recovery_action='retain_latch_and_retry_remaining_only', **diagnostic_fields(error))
             await asyncio.sleep(self.cfg['kill_switch']['flatten_retry_sec'])
         if self.bot.exchange.positions or remaining_orders:
             await self.event('kill_flatten_incomplete', 'critical', reason=self.kill.triggered)
@@ -189,12 +200,31 @@ class SafetySupervisor:
             if not await self.bot.exchange.recover_execution():
                 await self.trip('pending_order_review')
                 return False
+            await self.bot.exchange.refresh_account()
             self.bot.merge_execution_state()
+            for symbol in set(self.bot.positions) - set(self.bot.exchange.positions):
+                await self.bot.adopt_native_close(symbol)
+            # Check identity and size before replacing any native protection.
+            local, remote = self.bot.positions, self.bot.exchange.positions
+            import math
+            mismatch = set(local) != set(remote) or any(
+                local[s]['side'] != remote[s]['side']
+                or not math.isclose(local[s]['amount'], remote[s]['amount'], rel_tol=self.cfg['exchange']['fill_qty_tolerance_pct'])
+                or not math.isclose(local[s]['entry'], remote[s]['entry'], rel_tol=self.cfg['recon']['entry_tolerance_pct'])
+                for s in set(local) & set(remote))
+            if mismatch:
+                await self.event('reconcile_mismatch', 'critical', report={'position_identity_or_quantity': sorted(set(local) | set(remote))})
+                await self.trip('reconcile_mismatch')
+                return False
             try:
                 for symbol, pos in list(self.bot.positions.items()):
                     if symbol in self.bot.exchange.positions:
+                        self.bot.exchange.constrain_actual_liquidation(symbol, pos, self.bot.exchange.positions[symbol]['remote'])
                         await self.bot.exchange.protect(symbol, pos)
-            except Exception:
+            except Exception as error:
+                await self.event('protection_recovery_exception', 'critical',
+                    stage=getattr(self.bot.exchange, 'execution_stage', 'protection_recovery'),
+                    recovery_action='latch_and_close_remaining', **diagnostic_fields(error))
                 await self.trip('protection_recovery_failed')
                 return False
         report = await reconcile(self.bot.exchange, self.bot, self.journal)
@@ -252,7 +282,9 @@ class SafetySupervisor:
         while True:
             if self.kill.check(self.bot.exchange, None):
                 self.ready = False
-                self.bot.save()
+                if not getattr(self, '_watchdog_latched', False):
+                    self.save_safely()
+                    self._watchdog_latched = True
             await asyncio.sleep(self.cfg['kill_switch']['monitor_interval_sec'])
 
     async def monitor(self):
@@ -310,8 +342,6 @@ class SafetySupervisor:
                     stage = 'daily_boundary'
                     utc = datetime.now(timezone.utc)
                     day = utc.date().isoformat()
-                    if day != self.kill.day and not self.kill.triggered:
-                        self.kill.reset_daily()
                     if utc.hour == self.cfg['alerts']['daily_report_hour_utc'] and self.last_report_day != day:
                         stage = 'daily_report'
                         await self.daily_report()
@@ -326,7 +356,8 @@ class SafetySupervisor:
                     self.ready = False
                     await self.event('monitor_exception', 'critical', stage=stage,
                         symbol=diagnostic_symbol, recovery_action='latch_and_reconcile', **diagnostic_fields(error))
-                    self.kill.on_api_error()
+                    # The adapter counts failed HTTP attempts; local failures
+                    # must not be counted as an additional Binance API error.
                     await self.trip('monitor_failure')
             await asyncio.sleep(self.cfg['kill_switch']['monitor_interval_sec'])
 

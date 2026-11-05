@@ -1,6 +1,7 @@
 """Continuous paper runtime for Khaled with adaptive exits."""
 
 import asyncio
+import copy
 from pathlib import Path
 
 import ccxt.async_support as ccxt
@@ -99,11 +100,10 @@ class DynamicPaperHunter(dynamic.CascadeHunter, PaperState):
             return False
         result = await self.strategy.CascadeHunter.enter(self, symbol, side, float(price))
         if getattr(self.exchange, "execution_fault", None):
-            await self.exchange.refresh_account()
             # CascadeHunter preserves its public False-on-failure contract. The
             # live runtime still latches and handles actual possible fills.
             for pending_symbol, pending in self.exchange.pending_protection.items():
-                if pending_symbol in self.exchange.positions and pending_symbol not in self.positions:
+                if pending_symbol not in self.positions:
                     self.positions[pending_symbol] = pending
             await self.safety.trip(self.exchange.execution_fault)
         elif self.safety.kill.triggered and self.safety.active:
@@ -127,11 +127,16 @@ class DynamicPaperHunter(dynamic.CascadeHunter, PaperState):
                 if symbol not in self.positions:
                     self.positions[symbol] = Position(pos)
                 else:
+                    if self.positions[symbol].get('signal_id') != pos.get('signal_id'):
+                        # A different locally retained position requires review;
+                        # never apply another position's fees or moving stop.
+                        continue
                     sm = 1 if pos['side'] == 'buy' else -1
                     if sm * (pos['sl'] - self.positions[symbol]['sl']) > 0:
                         self.positions[symbol]['sl'] = pos['sl']
                     self.positions[symbol]['entry_fee'] = pos['entry_fee']
                     self.positions[symbol]['accounting_status'] = pos.get('accounting_status', 'pending')
+                    self.positions[symbol]['protection'] = copy.deepcopy(pos.get('protection', {}))
         self.finalize_closed_trades()
 
     def finalize_closed_trades(self):
@@ -146,7 +151,7 @@ class DynamicPaperHunter(dynamic.CascadeHunter, PaperState):
             final = closes[-1]
             stored = final.get('exit_position')
             if not stored: continue
-            entry = next((r.get('position') or r.get('entry_facts') for r in exchange.executions.values()
+            entry = next((r.get('entry_facts') or r.get('position') for r in exchange.executions.values()
                           if (r.get('position') or r.get('entry_facts') or {}).get('signal_id') == signal_id), None)
             entry = entry or stored
             quantity = sum(t['amount'] for t in closes)
@@ -156,7 +161,8 @@ class DynamicPaperHunter(dynamic.CascadeHunter, PaperState):
             if active and active.get('signal_id') == signal_id and final['symbol'] in exchange.positions: continue
             if entry.get('accounting_status') != 'complete' or any(t.get('accounting_status') != 'complete' for t in closes): continue
             if not final.get('exit_detail'):
-                stored = dict(stored, entry_fee=entry['entry_fee'])
+                stored = dict(stored, entry_fee=entry['entry_fee'], amount=entry['amount'],
+                              entry=entry['entry'], leverage=entry['leverage'], margin=entry['margin'])
                 fees = sum(t['fee_usdt'] for t in closes)
                 price = sum(t['amount'] * t['price'] for t in closes) / quantity
                 reason = final.get('exit_reason', 'recovered_close')
@@ -289,10 +295,12 @@ class DynamicPaperHunter(dynamic.CascadeHunter, PaperState):
         for trade in self.exchange.trades:
             record = self.exchange.executions.get(self.exchange.execution_key(trade['symbol'], trade['id']))
             if record:
-                record['trade'] = dict(trade)
+                for key in ('entry_signal', 'entry_reason', 'take_profit_price', 'stop_loss_price',
+                            'exit_reason', 'trigger_price', 'exit_position', 'exit_detail', 'legacy_exit_detail'):
+                    if key in trade: record['trade'][key] = copy.deepcopy(trade[key])
                 pos = self.positions.get(trade['symbol'])
                 if record.get('position') and pos and record['position']['signal_id'] == pos['signal_id']:
-                    record['position'] = dict(pos)
+                    self.exchange.merge_strategy_position(record['position'], pos)
         self.exchange._flush_executions()
 
     async def _drain_notifications(self):
@@ -306,31 +314,50 @@ class DynamicPaperHunter(dynamic.CascadeHunter, PaperState):
         await self.exchange.recover_execution()
         closes = [t for t in self.exchange.trades if t.get('reduceOnly') and t['symbol'] == symbol
                   and t.get('signal_id') == pos['signal_id']]
-        reason = 'recovered_close'
-        if not closes:
+        entry = next((r.get('entry_facts') for r in self.exchange.executions.values()
+                      if r.get('entry_facts', {}).get('signal_id') == pos['signal_id']), None)
+        original_quantity = entry['amount'] if entry else pos['amount']
+        def incomplete():
+            quantity = sum(t['amount'] for t in closes)
+            return not math.isclose(quantity, original_quantity, rel_tol=self.cfg['exchange']['fill_qty_tolerance_pct'])
+        reason = closes[-1].get('exit_reason', 'recovered_close') if closes else 'recovered_close'
+        if incomplete():
             for name, protection in pos.get('protection', {}).items():
                 data = await self.exchange.query_order_by_client_id(symbol, protection['clientOrderId'])
-                if not data or not data.get('actualOrderId'): continue
+                actual_id = str((data or {}).get('actualOrderId') or '')
+                if not actual_id.isdigit() or int(actual_id) <= 0: continue
+                if any(str(t['id']) == actual_id for t in closes): continue
                 order = await self.exchange._request('GET', '/fapi/v1/order', {
-                    'symbol': self.exchange.raw(symbol), 'orderId': data['actualOrderId']}, retry=True)
+                    'symbol': self.exchange.raw(symbol), 'orderId': actual_id}, retry=True)
                 order = await self.exchange.settle_fill(symbol, order)
+                if order.get('side') != ('SELL' if pos['side'] == 'buy' else 'BUY'): continue
                 if float(order.get('executedQty', 0)) <= 0: continue
                 await self.exchange._accept_fill(symbol, order, {'reduceOnly': True,
                     'signal_id': pos['signal_id'], 'expected_price': float(protection['trigger'])},
                     order['side'].lower(), recovered=True)
                 reason = 'SL' if name == 'sl' else 'TP'
-                closes = [self.exchange.trades[-1]]
-                break
-        if not closes:
+                closes = [t for t in self.exchange.trades if t.get('reduceOnly') and t.get('signal_id') == pos['signal_id']]
+                if not incomplete(): break
+        if incomplete():
             # A remote reducing execution may be absent from both local intents
             # and native protection metadata. Discover it without sending orders.
-            fills = await self.exchange._request('GET', '/fapi/v1/userTrades', {
-                'symbol': self.exchange.raw(symbol), 'startTime': int(pos['opened_at'] * 1000),
-                'limit': self.cfg['exchange']['trade_page_limit']}, retry=True)
+            params = {'symbol': self.exchange.raw(symbol), 'startTime': int(pos['opened_at'] * 1000),
+                      'limit': self.cfg['exchange']['trade_page_limit']}
+            fills = []
+            for _ in range(self.cfg['exchange']['trade_max_pages']):
+                page = await self.exchange._request('GET', '/fapi/v1/userTrades', params, retry=True)
+                fills.extend(page)
+                if len(page) < params['limit'] or not page or 'id' not in page[-1]: break
+                next_id = int(page[-1]['id']) + 1
+                if next_id <= params.get('fromId', -1): break
+                params.pop('startTime', None)  # Binance forbids time filters with fromId.
+                params['fromId'] = next_id
             for order_id in dict.fromkeys(str(f['orderId']) for f in fills if f.get('orderId')):
+                if any(str(t['id']) == order_id for t in closes): continue
                 order = await self.exchange._request('GET', '/fapi/v1/order', {
                     'symbol': self.exchange.raw(symbol), 'orderId': order_id}, retry=True)
                 if order.get('reduceOnly') not in (True, 'true') or order.get('status') not in ('FILLED', 'EXPIRED', 'CANCELED'): continue
+                if order.get('side') != ('SELL' if pos['side'] == 'buy' else 'BUY'): continue
                 if float(order.get('executedQty', 0)) <= 0: continue
                 await self.exchange._accept_fill(symbol, order, {'reduceOnly': True,
                     'signal_id': pos['signal_id'], 'exit_position': dict(pos)}, order['side'].lower(), recovered=True)
@@ -338,7 +365,7 @@ class DynamicPaperHunter(dynamic.CascadeHunter, PaperState):
         if not closes: return False
         quantity = sum(t['amount'] for t in self.exchange.trades if t.get('reduceOnly')
                        and t.get('signal_id') == pos['signal_id'])
-        if not math.isclose(quantity, pos['amount'], rel_tol=self.cfg['exchange']['fill_qty_tolerance_pct']):
+        if not math.isclose(quantity, original_quantity, rel_tol=self.cfg['exchange']['fill_qty_tolerance_pct']):
             return False
         self.record_exit_reason(symbol, reason, closes[-1]['price'])
         self.persist_execution_metadata()
@@ -373,7 +400,12 @@ class DynamicPaperHunter(dynamic.CascadeHunter, PaperState):
                 await self.close_position(symbol, "time_stop", price)
             elif self.execution_mode != "paper":
                 try: await self.exchange.protect(symbol, pos)
-                except Exception: await self.safety.trip("protection_update_failed")
+                except Exception as error:
+                    from infra.errors import diagnostic_fields
+                    await self.safety.event('protection_update_exception', 'critical', symbol=symbol,
+                        stage=getattr(self.exchange, 'execution_stage', 'protection_update'),
+                        recovery_action='latch_and_close_remaining', **diagnostic_fields(error))
+                    await self.safety.trip("protection_update_failed")
         await self._drain_notifications()
         self.save()
 
