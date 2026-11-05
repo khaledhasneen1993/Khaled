@@ -214,6 +214,7 @@ class SimulatedBinance:
         data = None
         if path == '/fapi/v1/time': data = {'serverTime': int(time.time() * 1000)}
         elif path == '/fapi/v1/marginType': data = {'code': 200}
+        elif path == '/fapi/v1/leverageBracket': data = [{'symbol': 'BTCUSDT', 'brackets': [{'initialLeverage': 10, 'notionalFloor': 0, 'notionalCap': 1000000, 'maintMarginRatio': .004, 'cum': 0}]}]
         elif path == '/fapi/v1/leverage': data = {'leverage': int(p['leverage'])}
         elif path == '/fapi/v1/ticker/price': data = {'price': str(self.price)}
         elif path == '/fapi/v1/klines':

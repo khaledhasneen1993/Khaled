@@ -192,7 +192,7 @@ def main():
         parser.error("Set CASCADE_DASHBOARD_TOKEN, or use --legacy-dashboard with a valid config")
     if cloud_publisher:
         log.info("COMBINED DASHBOARD TELEMETRY ENABLED | session=%s", session_id)
-    log.info("KHALED %s | state=%s | equity margin=10%% | leverage=%sx | ATR TP/SL | max=3", bot.execution_mode, bot.state_path, bot.exchange.leverage)
+    log.info("KHALED %s | state=%s | equity margin=10%% | leverage=%sx | ATR TP/SL | max=3", bot.execution_mode, bot.state_path, bot.settings()["LEVERAGE"])
     if bot.execution_mode == "paper":
         log.warning("Paper model excludes liquidation and real funding fills")
     try:

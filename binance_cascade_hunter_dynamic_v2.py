@@ -56,6 +56,8 @@ class CascadeHunter:
         return price * cfg["atr"]["fallback_atr_pct"], "fallback"
 
     async def set_leverage(self, symbol):
+        if getattr(self, 'execution_mode', 'paper') == 'testnet' and self.cfg['exchange'].get('leverage_policy') == 'maximum_by_bracket':
+            return  # selected and confirmed while sizing
         try:
             await self.exchange.set_leverage(LEVERAGE, symbol)
         except Exception as e:
@@ -130,6 +132,9 @@ class CascadeHunter:
         bal = await self.exchange.fetch_balance()
         usdt = max(0.0, float(bal["USDT"].get("equity", bal["USDT"]["total"])))  # current equity, not initial capital
         price = (await self.exchange.fetch_ticker(symbol))["last"]
+        if getattr(self, 'execution_mode', 'paper') == 'testnet' and self.cfg['exchange'].get('leverage_policy') == 'maximum_by_bracket':
+            choice = await self.exchange.select_leverage(symbol, usdt * self.cfg['margin_fraction_per_position'], price)
+            return choice['amount']
         notional = usdt * MAX_POSITION_PCT * LEVERAGE
         if getattr(self, "execution_mode", "paper") == "mainnet":
             notional *= self.exchange.allocation_fraction

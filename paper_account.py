@@ -236,10 +236,11 @@ class PaperState:
         self.last_trade = state["last_trade"]
         if state.get("operations") and hasattr(self, "safety"):
             self.safety.restore(state["operations"])
-        if set(self.positions) != set(self.exchange.positions):
+        if getattr(self, 'execution_mode', 'paper') == 'paper' and set(self.positions) != set(self.exchange.positions):
             raise ValueError("Inconsistent saved positions")
 
     def save(self):
+        if hasattr(self, 'persist_execution_metadata'): self.persist_execution_metadata()
         state = {
             "version": 1, "initial_balance_usdt": getattr(self, "initial_balance", 100.0),
             **({"operations": self.safety.dump()} if hasattr(self, "safety") else {}),

@@ -5,6 +5,8 @@ Native conditional protection uses the Futures Algo API. Requires one-way mode
 and a dedicated single-asset USDT-M account. Mainnet is gated before construction.
 """
 import asyncio
+import base64
+import copy
 import hashlib
 import hmac
 import json
@@ -23,9 +25,10 @@ from infra.journal import OperationalJournal, atomic_json
 from infra.rate_limit import TokenBucket, with_backoff
 from risk.slippage import entry_slippage_bps, exit_slippage_bps
 from .orders import ExchangeError, ExecutionUnknown, safe_create_order
+from .execution import DurableExecution
 
 
-class LiveExchange(PaperExchange):
+class LiveExchange(DurableExecution, PaperExchange):
     def __init__(self, cfg: dict, rate_limiter):
         self.cfg = cfg
         self.mode = cfg['exchange']['mode']
@@ -34,11 +37,27 @@ class LiveExchange(PaperExchange):
         if self.mode == 'mainnet':
             from .rollout import require_mainnet_readiness
             require_mainnet_readiness(cfg)
+        if self.mode == 'testnet':
+            from .demo import validate_demo
+            validate_demo(cfg)
         key, secret = os.getenv('BINANCE_API_KEY'), os.getenv('BINANCE_API_SECRET')
-        if not key or not secret:
-            raise ValueError('Set BINANCE_API_KEY and BINANCE_API_SECRET locally')
-        if any(not value.isprintable() or any(char.isspace() for char in value) for value in (key, secret)):
+        rsa_path = os.getenv('BINANCE_RSA_PRIVATE_KEY_PATH')
+        if not key or bool(secret) == bool(rsa_path):
+            raise ValueError('Set API key and exactly one HMAC secret or RSA private key path locally')
+        if any(not value.isprintable() or any(char.isspace() for char in value) for value in (key, secret or 'unused')):
             raise ValueError('API credentials contain invalid whitespace or control characters')
+        self._rsa = None
+        if rsa_path:
+            from cryptography.hazmat.primitives.serialization import load_pem_private_key
+            from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey
+            try:
+                path = Path(rsa_path)
+                if path.stat().st_mode & 0o077:
+                    raise ValueError()
+                self._rsa = load_pem_private_key(path.read_bytes(), password=None)
+                if not isinstance(self._rsa, RSAPrivateKey): raise ValueError()
+            except Exception:
+                raise ValueError('RSA private key must be a readable RSA PEM with mode 0600') from None
         self.allocation_fraction = 1.
         if self.mode == 'mainnet':
             from .rollout import mainnet_allocation_fraction
@@ -67,6 +86,12 @@ class LiveExchange(PaperExchange):
         self.intents = json.loads(self.intent_path.read_text()) if self.intent_path.exists() else {}
         self.on_api_error = None
         self.pending_protection = {}
+        self.selected_leverage = {}
+        self.brackets = {}
+        self.execution_path = self.intent_path.parent / 'executions.json'
+        self.executions = json.loads(self.execution_path.read_text()) if self.execution_path.exists() else {}
+        protection_path = self.intent_path.parent / 'protection.json'
+        if protection_path.exists(): self.pending_protection = json.loads(protection_path.read_text())
         self.execution_fault = None
 
     @property
@@ -80,14 +105,17 @@ class LiveExchange(PaperExchange):
         self.intents[client_id] = {'symbol': params['symbol'], 'type': params['type'],
             'side': params['side'], 'amount': params['amount'],
             'params': {k: v for k, v in params['params'].items() if k in
-                       ('reduceOnly', 'expected_price', 'exit_atr', 'atr_source', 'stopPrice', 'round_up', 'newClientOrderId', 'signal_id')},
+                       ('reduceOnly', 'expected_price', 'exit_atr', 'atr_source', 'stopPrice', 'round_up', 'newClientOrderId', 'signal_id', 'leverage', 'risk_cfg', 'equity', 'brackets', 'exit_reason', 'exit_position')},
             'status': 'pending'}
         atomic_json(self.intent_path, self.intents)
+        self.journal.log('order_intent_saved', stage='before_post', symbol=params['symbol'], client_order_id=client_id, recovery_action='query_same_id')
 
     def resolve_intent(self, client_id, result):
         self.intents[client_id]['status'] = 'observed'
         self.intents[client_id]['order_id'] = result.get('orderId', result.get('algoId'))
+        self.intents[client_id]['response'] = result
         atomic_json(self.intent_path, self.intents)
+        self.journal.log('order_observed', stage='order_query_or_response', symbol=self.intents[client_id]['symbol'], client_order_id=client_id, order_id=self.intents[client_id]['order_id'])
 
     def reject_intent(self, client_id):
         self.intents[client_id]['status'] = 'rejected'
@@ -97,7 +125,13 @@ class LiveExchange(PaperExchange):
         value = {**params, 'timestamp': int(time.time() * 1000 + self.clock_offset_ms),
                  'recvWindow': self.cfg['exchange']['recv_window_ms']}
         query = urlencode(value)
-        return {**value, 'signature': hmac.new(self._secret.encode(), query.encode(), hashlib.sha256).hexdigest()}
+        if self._rsa:
+            from cryptography.hazmat.primitives import hashes
+            from cryptography.hazmat.primitives.asymmetric import padding
+            signature = base64.b64encode(self._rsa.sign(query.encode(), padding.PKCS1v15(), hashes.SHA256())).decode()
+        else:
+            signature = hmac.new(self._secret.encode(), query.encode(), hashlib.sha256).hexdigest()
+        return {**value, 'signature': signature}
 
     async def _request(self, method, path, params=None, signed=True, retry=False):
         async def once():
@@ -121,7 +155,8 @@ class LiveExchange(PaperExchange):
                 data = {}
             if response.status_code >= 400 or isinstance(data, dict) and int(data.get('code', 0)) < 0:
                 code = data.get('code', 0) if isinstance(data, dict) else 0
-                if self.on_api_error and code not in self.cfg['exchange']['non_incident_error_codes']:
+                expected_limit = path == '/fapi/v1/leverage' and code in self.cfg['exchange']['leverage_rejection_codes']
+                if self.on_api_error and not expected_limit and code not in self.cfg['exchange']['non_incident_error_codes']:
                     self.on_api_error()
                 try: after = float(response.headers.get('Retry-After', 0))
                 except ValueError: after = self.cfg['exchange']['max_backoff_sec']
@@ -221,17 +256,47 @@ class LiveExchange(PaperExchange):
         await self.refresh_account()
         return {'USDT': {'free': self.free, 'used': self.used, 'total': self.balance, 'equity': self.equity}}
 
+    async def leverage_brackets(self, symbol):
+        data = await self._request('GET', '/fapi/v1/leverageBracket', {'symbol': self.raw(symbol)}, retry=True)
+        row = data[0] if isinstance(data, list) else data
+        self.brackets[symbol] = row['brackets']
+        return row['brackets']
+
+    async def select_leverage(self, symbol, margin, price, confirm=True):
+        from .leverage import choose_leverage
+        brackets = await self.leverage_brackets(symbol)
+        ceiling = None
+        while True:
+            choice = choose_leverage(brackets, margin, price, lambda q: float(self.amount_to_precision(symbol, q)), ceiling)
+            if not confirm: break
+            try:
+                maximum = await self.set_leverage(choice['leverage'], symbol)
+            except ExchangeError as error:
+                # Definitive leverage/account limits only. Transport uncertainty
+                # never authorizes an order or a silent guessed leverage.
+                if error.code not in self.cfg['exchange']['leverage_rejection_codes'] or choice['leverage'] <= 1: raise
+                ceiling = choice['leverage'] - 1
+                continue
+            if choice['notional'] > maximum:
+                if choice['leverage'] <= 1: raise ValueError('No accepted leverage/notional combination')
+                ceiling = choice['leverage'] - 1
+                continue
+            choice['confirmed'] = True
+            break
+        self.selected_leverage[symbol] = choice
+        return choice
+
     async def set_leverage(self, leverage, symbol):
         async with self._leverage_lock:
-            if leverage != self.cfg['leverage']: raise ValueError('Leverage differs from configuration')
-            if symbol in self._leverage_set: return
             try:
                 await self._request('POST', '/fapi/v1/marginType', {'symbol': self.raw(symbol), 'marginType': 'ISOLATED'})
             except ExchangeError as error:
                 if error.code != -4046: raise
             result = await self._request('POST', '/fapi/v1/leverage', {'symbol': self.raw(symbol), 'leverage': leverage})
             if int(result['leverage']) != leverage: raise ValueError('Leverage was not confirmed')
+            maximum = float(result.get('maxNotionalValue', 'inf'))
             self._leverage_set.add(symbol)
+            return maximum
 
     async def get_position(self, symbol):
         return await self._request('GET', '/fapi/v3/positionRisk', {'symbol': self.raw(symbol)} if symbol else {}, retry=True)
@@ -274,86 +339,6 @@ class LiveExchange(PaperExchange):
             'type': 'MARKET', 'quantity': quantity, 'newClientOrderId': client_id, 'newOrderRespType': 'RESULT',
             **({'reduceOnly': 'true'} if options.get('reduceOnly') else {})})
 
-    async def settle_fill(self, symbol, order):
-        for _ in range(self.cfg['exchange']['order_poll_attempts']):
-            if order.get('status') in ('FILLED', 'EXPIRED', 'CANCELED', 'REJECTED'):
-                if float(order.get('executedQty', 0)) > 0: return order
-                raise ExchangeError(400)
-            await asyncio.sleep(self.cfg['exchange']['order_poll_sec'])
-            order = await self._request('GET', '/fapi/v1/order', {'symbol': self.raw(symbol), 'orderId': order['orderId']}, retry=True)
-        raise ExecutionUnknown()
-
-    async def create_order(self, symbol, type, side, amount, params=None):
-        try:
-            return await self._create_order(symbol, type, side, amount, params)
-        except Exception:
-            self.journal.log('order_execution_failed', symbol=symbol)
-            self.execution_fault = 'order_execution_uncertain'
-            raise ExchangeError() from None
-
-    async def _create_order(self, symbol, type, side, amount, params=None):
-        options = params or {}
-        if not options.get('reduceOnly'):
-            await self.set_leverage(self.leverage, symbol)
-        expected = float(options.get('expected_price') or (await self.fetch_ticker(symbol))['last'])
-        equity = self.equity * self.allocation_fraction
-        result = await safe_create_order(self, {'symbol': symbol, 'type': type, 'side': side, 'amount': amount, 'params': options}, self.journal)
-        result = await self.settle_fill(symbol, result)
-        actual, filled = float(result['avgPrice']), float(result['executedQty'])
-        if actual <= 0 or filled <= 0: raise ExecutionUnknown()
-        fills = await self._request('GET', '/fapi/v1/userTrades', {'symbol': self.raw(symbol), 'orderId': result['orderId'], 'limit': self.cfg['exchange']['trade_page_limit']}, retry=True)
-        if not fills or any(f['commissionAsset'] != 'USDT' for f in fills):
-            raise ExecutionUnknown()  # exact net accounting is required
-        quantity_sum = sum(float(f['qty']) for f in fills)
-        if not math.isclose(quantity_sum, filled, rel_tol=self.cfg['exchange']['fill_qty_tolerance_pct'], abs_tol=0):
-            raise ExecutionUnknown()
-        fee = sum(float(f['commission']) for f in fills)
-        trade = {'id': str(result['orderId']), 'client_id': result['clientOrderId'],
-            'timestamp': datetime.now(timezone.utc).isoformat(), 'symbol': symbol, 'side': side,
-            'amount': filled, 'price': actual, 'reduceOnly': bool(options.get('reduceOnly')),
-            'fee_usdt': fee, 'pnl_usdt': sum(float(f['realizedPnl']) for f in fills),
-            'balance_usdt': self.balance, 'mode': self.mode}
-        if options.get('reduceOnly'):
-            trade['signal_id'] = options.get('signal_id')
-            original_side = 'sell' if side == 'buy' else 'buy'
-            trade.update(expected_exit=expected, actual_exit=actual,
-                         exit_slippage_bps=exit_slippage_bps(expected, actual, original_side))
-        else:
-            pos = make_position(side, actual, filled, self.leverage,
-                options.get('exit_atr', actual * self.cfg['atr']['fallback_atr_pct']), self.cfg, equity,
-                max(self.fee_rate, fee / (actual * filled)), atr_source=options.get('atr_source', 'fallback'))
-            pos['entry_fee'] = fee
-            pos['account_equity_at_entry'] = self.equity
-            pos['allocation_fraction'] = self.allocation_fraction
-            pos.update(expected_entry=expected, actual_entry=actual,
-                       entry_slippage_bps=entry_slippage_bps(expected, actual, side))
-            trade.update({k: pos[k] for k in ('expected_entry', 'actual_entry', 'entry_slippage_bps', 'signal_id')})
-            self.pending_protection[symbol] = pos
-            self.trades.append(trade)
-            atomic_json(self.intent_path.parent / 'filled_entries.json', self.trades)
-            remote = [p for p in await self.get_position(symbol) if float(p['positionAmt']) != 0]
-            if not remote:
-                raise ExecutionUnknown()
-            liquidation = float(remote[0]['liquidationPrice'])
-            margin = self.cfg['tp_sl']['liq_safety_margin']
-            safe = (pos['sl'] > liquidation * (1 + margin) if side == 'buy'
-                    else pos['sl'] < liquidation * (1 - margin))
-            if liquidation <= 0 or not safe:
-                raise ExecutionUnknown()  # preserve strategy levels; flatten instead of using an unsafe stop
-            try:
-                await self.protect(symbol, pos)
-            except Exception:
-                # The fill is real. Keep its metadata and let the runtime kill
-                # path reconcile and flatten; never pretend the entry failed.
-                raise ExecutionUnknown() from None
-        if options.get('reduceOnly'):
-            self.trades.append(trade)
-        await self.refresh_account()
-        if options.get('reduceOnly') and symbol in self.positions:
-            raise ExecutionUnknown()
-        return {**trade, 'average': actual, 'filled': filled, 'status': 'closed',
-                **({'risk_position': pos} if not options.get('reduceOnly') else {})}
-
     async def protect(self, symbol, pos):
         """Create-confirm-before-cancel: no unsupported atomic STOP amendment."""
         side = 'sell' if pos['side'] == 'buy' else 'buy'
@@ -362,18 +347,22 @@ class LiveExchange(PaperExchange):
             # Stop rounds toward entry; TP rounds away, preserving planned RR.
             round_up = pos['side'] == 'buy'
             trigger = self._price(symbol, target, round_up)
-            if old and old['trigger'] == trigger: continue
+            if old and old['trigger'] == trigger and old.get('amount') == pos['amount']: continue
             result = await safe_create_order(self, {'symbol': symbol, 'type': kind, 'side': side,
                 'amount': pos['amount'], 'params': {'reduceOnly': True, 'stopPrice': float(trigger), 'round_up': round_up}}, self.journal)
             client_id = result['clientAlgoId']
             confirmed = await self.query_order_by_client_id(symbol, client_id)
             if not confirmed or confirmed.get('algoStatus') not in ('NEW',):
                 raise ExecutionUnknown()
-            new = {'orderId': result['algoId'], 'clientOrderId': client_id, 'trigger': trigger, 'is_algo': True}
+            new = {'orderId': result['algoId'], 'clientOrderId': client_id, 'trigger': trigger, 'is_algo': True, 'amount': pos['amount']}
             pos.setdefault('protection', {})[name] = new
             # Persist new protection before removing any old order.
             self.pending_protection[symbol] = pos
             atomic_json(self.intent_path.parent / 'protection.json', self.pending_protection)
+            for record in self.executions.values():
+                if record['symbol'] == symbol and record.get('position', {}).get('signal_id') == pos['signal_id']:
+                    record['position'] = dict(pos)
+            self._flush_executions()
             if old:
                 try: await self.cancel_algo(old)
                 except ExchangeError as error:

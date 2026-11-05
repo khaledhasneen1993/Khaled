@@ -67,12 +67,14 @@ class DynamicPaperHunter(dynamic.CascadeHunter, PaperState):
         self.scanner = ContinuousScanner(self, config=self.strategy)
 
     def settings(self):
-        return {"mode": "dynamic_scan", "execution_mode": self.execution_mode, "active_exit": {key: self.cfg[key] for key in ("tp_sl", "atr", "exit")},
+        result = {"mode": "dynamic_scan", "execution_mode": self.execution_mode, "active_exit": {key: self.cfg[key] for key in ("tp_sl", "atr", "exit")},
                 **{name: getattr(self.strategy, name) for name in (
             "LEVERAGE", "MAX_POSITION_PCT", "CASCADE_THRESHOLD", "VOLUME_SPIKE",
             "COOLDOWN_SEC", "SCAN_INTERVAL",
             "MAX_SYMBOLS_TO_SCAN", "MAX_CONCURRENT_POSITIONS", "MIN_QUOTE_VOLUME",
         )}}
+        if self.execution_mode != 'paper': result['LEVERAGE'] = self.cfg['exchange']['leverage_policy']
+        return result
 
     async def enter(self, symbol, side, price):
         # ContinuousScanner owns the entry lock; do not acquire it again here.
@@ -110,6 +112,44 @@ class DynamicPaperHunter(dynamic.CascadeHunter, PaperState):
         self.save()
         return result
 
+    def merge_execution_state(self):
+        """Merge exchange facts while retaining local strategy/dynamic stop metadata."""
+        from paper_account import Position
+        live = self.exchange
+        seen = set()
+        for record in reversed(list(live.executions.values())):
+            pos = record.get('position')
+            symbol = record['symbol']
+            if pos and symbol in live.positions and symbol not in seen:
+                seen.add(symbol)
+                if symbol not in self.positions:
+                    self.positions[symbol] = Position(pos)
+                else:
+                    sm = 1 if pos['side'] == 'buy' else -1
+                    if sm * (pos['sl'] - self.positions[symbol]['sl']) > 0:
+                        self.positions[symbol]['sl'] = pos['sl']
+                    self.positions[symbol]['entry_fee'] = pos['entry_fee']
+                    self.positions[symbol]['accounting_status'] = pos.get('accounting_status', 'pending')
+        for trade in live.trades:
+            if trade.get('exit_position') and trade.get('accounting_status') == 'complete' and not trade.get('exit_detail'):
+                stored = trade['exit_position']
+                entry = next((r.get('position') for r in live.executions.values()
+                              if r.get('position', {}).get('signal_id') == stored['signal_id']), None)
+                closes = [t for t in live.trades if t.get('reduceOnly') and t.get('signal_id') == stored['signal_id']]
+                if entry and entry.get('accounting_status') == 'complete' and all(t.get('accounting_status') == 'complete' for t in closes):
+                    stored['entry_fee'] = entry['entry_fee']
+                    fee = sum(t['fee_usdt'] for t in closes)
+                    amount = sum(t['amount'] for t in closes)
+                    price = sum(t['amount'] * t['price'] for t in closes) / amount
+                    trade['exit_detail'] = exit_record(Position(stored), trade['exit_reason'], price,
+                        datetime.fromisoformat(trade['timestamp']).timestamp(), fee)
+                    trade['exit_detail']['net_pnl_usdt'] = sum(t['pnl_usdt'] for t in closes) - fee - entry['entry_fee']
+                    self._notifications.append(trade)
+            if trade.get('reduceOnly') and trade.get('exit_reason'):
+                symbol = trade['symbol']
+                if symbol in self.positions and symbol not in live.positions:
+                    self.record_exit_reason(symbol, trade['exit_reason'], trade['price'])
+
     def record_entry_signal(self, symbol, signal):
         for trade in reversed(self.exchange.trades):
             if trade["symbol"] == symbol and not trade["reduceOnly"]:
@@ -132,6 +172,11 @@ class DynamicPaperHunter(dynamic.CascadeHunter, PaperState):
                 if not closes: closes = [trade]
                 quantity = sum(t["amount"] for t in closes)
                 weighted_exit = sum(t["price"] * t["amount"] for t in closes) / quantity
+                if (position.get('accounting_status') == 'pending'
+                        or any(t.get('accounting_status') == 'pending' for t in closes)):
+                    trade['accounting_status'] = 'pending'
+                    trade['exit_position'] = dict(position)
+                    return
                 total_fees = sum(t["fee_usdt"] for t in closes)
                 trade["exit_detail"] = exit_record(
                     position, {"SL": "stop_loss", "TP": "take_profit"}.get(reason, reason),
@@ -167,6 +212,7 @@ class DynamicPaperHunter(dynamic.CascadeHunter, PaperState):
 
     async def close_position(self, symbol, reason, trigger_price=None):
         if self.execution_mode != "paper":
+            await self.exchange.settle_before_close(symbol)
             await self.exchange.refresh_account()
         account = self.exchange.positions.get(symbol)
         if account is None:
@@ -178,7 +224,8 @@ class DynamicPaperHunter(dynamic.CascadeHunter, PaperState):
         try:
             await self.exchange.create_order(symbol, "market", "sell" if account["side"] == "buy" else "buy",
                 account["amount"], params={"reduceOnly": True, "expected_price": price,
-                                          "signal_id": self.positions.get(symbol, {}).get("signal_id")})
+                                          "signal_id": self.positions.get(symbol, {}).get("signal_id"),
+                                          "exit_reason": reason, "exit_position": self.positions.get(symbol)})
         except Exception:
             if self.execution_mode != "paper":
                 await self.exchange.refresh_account()
@@ -193,45 +240,75 @@ class DynamicPaperHunter(dynamic.CascadeHunter, PaperState):
             for order in await self.exchange.get_open_orders(symbol):
                 if order.get("is_algo"): await self.exchange.cancel_algo(order)
                 else: await self.exchange.cancel_order(symbol, order_id=order["orderId"])
+        self.persist_execution_metadata()
         await self._drain_notifications()
         self.save()
+
+    def persist_execution_metadata(self):
+        if self.execution_mode == 'paper': return
+        for trade in self.exchange.trades:
+            record = self.exchange.executions.get(self.exchange.execution_key(trade['symbol'], trade['id']))
+            if record:
+                record['trade'] = dict(trade)
+                pos = self.positions.get(trade['symbol'])
+                if record.get('position') and pos and record['position']['signal_id'] == pos['signal_id']:
+                    record['position'] = dict(pos)
+        self.exchange._flush_executions()
 
     async def _drain_notifications(self):
         while self._notifications:
             await self.safety.closed(self._notifications.pop(0))
 
     async def adopt_native_close(self, symbol):
-        if self.execution_mode == "paper": return False
+        if self.execution_mode == 'paper': return False
         pos = self.positions[symbol]
-        for name, protection in pos.get("protection", {}).items():
-            data = await self.exchange.query_order_by_client_id(symbol, protection["clientOrderId"])
-            if not data or not data.get("actualOrderId"): continue
-            order = await self.exchange._request("GET", "/fapi/v1/order", {"symbol": self.exchange.raw(symbol), "orderId": data["actualOrderId"]}, retry=True)
-            order = await self.exchange.settle_fill(symbol, order)
-            if abs(float(order["executedQty"]) - pos["amount"]) > self.cfg["recon"]["size_tolerance_pct"] * pos["amount"]:
-                continue
-            fills = await self.exchange._request("GET", "/fapi/v1/userTrades", {"symbol": self.exchange.raw(symbol), "orderId": order["orderId"], "limit": self.cfg["exchange"]["trade_page_limit"]}, retry=True)
-            if not fills or any(f["commissionAsset"] != "USDT" for f in fills): return False
-            if not math.isclose(sum(float(f["qty"]) for f in fills), float(order["executedQty"]),
-                                rel_tol=self.cfg["exchange"]["fill_qty_tolerance_pct"], abs_tol=0): return False
-            actual = float(order["avgPrice"])
-            expected = float(protection["trigger"])
-            trade = {"id": str(order["orderId"]), "timestamp": datetime.now(timezone.utc).isoformat(),
-                "symbol": symbol, "mode": self.execution_mode, "signal_id": pos["signal_id"], "side": order["side"].lower(), "amount": float(order["executedQty"]),
-                "price": actual, "reduceOnly": True, "fee_usdt": sum(float(f["commission"]) for f in fills),
-                "pnl_usdt": sum(float(f["realizedPnl"]) for f in fills), "balance_usdt": self.exchange.balance,
-                "expected_exit": expected, "actual_exit": actual,
-                "exit_slippage_bps": exit_slippage_bps(expected, actual, pos["side"])}
-            if any(t["id"] == trade["id"] and t.get("reduceOnly") for t in self.exchange.trades): return False
-            self.exchange.trades.append(trade)
-            self.record_exit_reason(symbol, "SL" if name == "sl" else "TP", actual)
-            self.positions.pop(symbol)
-            for remaining in await self.exchange.get_open_orders(symbol):
-                if remaining.get("is_algo"): await self.exchange.cancel_algo(remaining)
-            await self._drain_notifications()
-            self.save()
-            return True
-        return False
+        # An explicit close can have succeeded before its local state write.
+        await self.exchange.recover_execution()
+        closes = [t for t in self.exchange.trades if t.get('reduceOnly') and t['symbol'] == symbol
+                  and t.get('signal_id') == pos['signal_id']]
+        reason = 'recovered_close'
+        if not closes:
+            for name, protection in pos.get('protection', {}).items():
+                data = await self.exchange.query_order_by_client_id(symbol, protection['clientOrderId'])
+                if not data or not data.get('actualOrderId'): continue
+                order = await self.exchange._request('GET', '/fapi/v1/order', {
+                    'symbol': self.exchange.raw(symbol), 'orderId': data['actualOrderId']}, retry=True)
+                order = await self.exchange.settle_fill(symbol, order)
+                if float(order.get('executedQty', 0)) <= 0: continue
+                await self.exchange._accept_fill(symbol, order, {'reduceOnly': True,
+                    'signal_id': pos['signal_id'], 'expected_price': float(protection['trigger'])},
+                    order['side'].lower(), recovered=True)
+                reason = 'SL' if name == 'sl' else 'TP'
+                closes = [self.exchange.trades[-1]]
+                break
+        if not closes:
+            # A remote reducing execution may be absent from both local intents
+            # and native protection metadata. Discover it without sending orders.
+            fills = await self.exchange._request('GET', '/fapi/v1/userTrades', {
+                'symbol': self.exchange.raw(symbol), 'startTime': int(pos['opened_at'] * 1000),
+                'limit': self.cfg['exchange']['trade_page_limit']}, retry=True)
+            for order_id in dict.fromkeys(str(f['orderId']) for f in fills if f.get('orderId')):
+                order = await self.exchange._request('GET', '/fapi/v1/order', {
+                    'symbol': self.exchange.raw(symbol), 'orderId': order_id}, retry=True)
+                if order.get('reduceOnly') not in (True, 'true') or order.get('status') not in ('FILLED', 'EXPIRED', 'CANCELED'): continue
+                if float(order.get('executedQty', 0)) <= 0: continue
+                await self.exchange._accept_fill(symbol, order, {'reduceOnly': True,
+                    'signal_id': pos['signal_id'], 'exit_position': dict(pos)}, order['side'].lower(), recovered=True)
+            closes = [t for t in self.exchange.trades if t.get('reduceOnly') and t.get('signal_id') == pos['signal_id']]
+        if not closes: return False
+        quantity = sum(t['amount'] for t in self.exchange.trades if t.get('reduceOnly')
+                       and t.get('signal_id') == pos['signal_id'])
+        if not math.isclose(quantity, pos['amount'], rel_tol=self.cfg['exchange']['fill_qty_tolerance_pct']):
+            return False
+        self.record_exit_reason(symbol, reason, closes[-1]['price'])
+        self.persist_execution_metadata()
+        self.positions.pop(symbol)
+        self.exchange.pending_protection.pop(symbol, None)
+        for remaining in await self.exchange.get_open_orders(symbol):
+            if remaining.get('is_algo'): await self.exchange.cancel_algo(remaining)
+        await self._drain_notifications()
+        self.save()
+        return True
 
     async def manage_exits(self):
         if self.execution_mode != "paper":

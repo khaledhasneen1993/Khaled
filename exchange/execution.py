@@ -1,0 +1,323 @@
+"""Durable execution facts and independently retryable exact USDT accounting.
+
+No network exactly-once claim: an unresolved intent blocks another POST. The
+execution ledger is keyed by Binance order ID, not a locally generated trade ID.
+"""
+import asyncio
+import copy
+import math
+from datetime import datetime, timezone
+
+from infra.journal import atomic_json
+from paper_account import make_position
+from risk.slippage import entry_slippage_bps, exit_slippage_bps
+from .orders import ExchangeError, ExecutionUnknown, safe_create_order
+from .leverage import bracket_for
+
+TERMINAL = {'FILLED', 'EXPIRED', 'CANCELED', 'REJECTED', 'EXPIRED_IN_MATCH'}
+
+
+class DurableExecution:
+    def execution_key(self, symbol, order_id):
+        return symbol + ':' + str(order_id)
+
+    def _flush_executions(self):
+        atomic_json(self.execution_path, self.executions)
+
+    def _upsert_trade(self, trade):
+        old = next((t for t in self.trades if str(t['id']) == str(trade['id']) and t['symbol'] == trade['symbol']), None)
+        if old is None: self.trades.append(copy.deepcopy(trade))
+        else: old.update(copy.deepcopy(trade))
+
+    def _remember_order(self, symbol, order, options, side):
+        key = self.execution_key(symbol, order['orderId'])
+        previous = self.executions.get(key, {})
+        # Never overwrite a larger confirmed cumulative fill with a stale query.
+        if float(order.get('executedQty', 0)) < float(previous.get('order', {}).get('executedQty', 0)):
+            return previous
+        record = {**previous, 'symbol': symbol, 'order': order,
+                  'options': copy.deepcopy(options), 'side': side}
+        self.executions[key] = record
+        self._flush_executions()
+        return record
+
+    async def settle_fill(self, symbol, order):
+        for attempt in range(self.cfg['exchange']['order_poll_attempts'] + 1):
+            if order.get('status') in TERMINAL:
+                if float(order.get('executedQty', 0)) > 0: return order
+                raise ExchangeError(400)
+            if attempt == self.cfg['exchange']['order_poll_attempts']: break
+            await asyncio.sleep(self.cfg['exchange']['order_poll_sec'])
+            order = await self._request('GET', '/fapi/v1/order', {'symbol': self.raw(symbol), 'orderId': order['orderId']}, retry=True)
+            client = order.get('clientOrderId')
+            if client in self.intents: self.resolve_intent(client, order)
+        raise ExecutionUnknown()
+
+    async def order_fills(self, symbol, order_id):
+        ec = self.cfg['exchange']
+        params = {'symbol': symbol, 'orderId': order_id, 'limit': ec['trade_page_limit']}
+        result, seen = [], set()
+        for _ in range(ec['trade_max_pages']):
+            page = await self._request('GET', '/fapi/v1/userTrades', params, retry=True)
+            for i, fill in enumerate(page):
+                identity = str(fill.get('id', i))
+                if identity not in seen and str(fill.get('orderId', order_id)) == str(order_id):
+                    result.append(fill); seen.add(identity)
+            if len(page) < ec['trade_page_limit'] or not page or 'id' not in page[-1]: break
+            next_id = int(page[-1]['id']) + 1
+            if next_id <= params.get('fromId', -1): break
+            params['fromId'] = next_id
+        return result
+
+    async def sync_accounting(self):
+        """Retry missing execution data; never erase a confirmed position."""
+        for record in self.executions.values():
+            trade = record.get('trade')
+            if not trade: continue
+            self._upsert_trade(trade)
+            if trade.get('accounting_status') == 'complete': continue
+            try:
+                fills = await self.order_fills(self.raw(record['symbol']), record['order']['orderId'])
+            except ExchangeError:
+                continue
+            # Endpoint may return a stale/partial page. Do not finalize estimates.
+            unique = {str(f.get('id', i)): f for i, f in enumerate(fills)}
+            fills = list(unique.values())
+            if not fills or any(f['commissionAsset'] != 'USDT' for f in fills): continue
+            quantity = sum(float(f['qty']) for f in fills)
+            if not math.isclose(quantity, trade['amount'], rel_tol=self.cfg['exchange']['fill_qty_tolerance_pct']): continue
+            from decimal import Decimal
+            fee = sum((Decimal(f['commission']) for f in fills), Decimal(0))
+            pnl = sum((Decimal(f['realizedPnl']) for f in fills), Decimal(0))
+            trade.update(fee_usdt=float(fee), pnl_usdt=float(pnl), fee_exact=str(fee),
+                         realized_pnl_exact=str(pnl), accounting_status='complete',
+                         execution_ids=[str(f.get('id', i)) for i, f in enumerate(fills)])
+            if record.get('position'):
+                record['position']['entry_fee'] = float(fee)
+                record['position']['accounting_status'] = 'complete'
+                # Actual entry fees can exceed the configured estimate. Tighten
+                # risk distance only; never loosen a dynamic stop.
+                pos = record['position']
+                options = record['options']
+                cfg = copy.deepcopy(options.get('risk_cfg', self.cfg))
+                cfg['tp_sl'].update(mmr=pos['mmr'], maintenance_amount=pos['maintenance_amount'], quantity=pos['amount'])
+                effective_fee = max(self.fee_rate, float(fee) / (pos['amount'] * pos['entry']))
+                levels = make_position(pos['side'], pos['entry'], pos['amount'], pos['leverage'], pos['atr_at_entry'],
+                    cfg, pos['equity_at_entry'], effective_fee)
+                sm = 1 if pos['side'] == 'buy' else -1
+                if sm * (levels['sl'] - pos['sl']) > 0:
+                    pos['sl'] = levels['sl']
+                    pos['risk_capped'] = True
+                symbol = record['symbol']
+                if symbol in self.pending_protection:
+                    self.pending_protection[symbol]['entry_fee'] = float(fee)
+                    self.pending_protection[symbol]['accounting_status'] = 'complete'
+                    self.pending_protection[symbol]['sl'] = pos['sl']
+            self._flush_executions()
+            self._upsert_trade(trade)
+
+    async def _accept_fill(self, symbol, order, options, side, recovered=False):
+        record = self._remember_order(symbol, order, options, side)
+        actual, filled = float(order.get('avgPrice', 0)), float(order.get('executedQty', 0))
+        if actual <= 0 or filled <= 0: raise ExecutionUnknown()
+        reducing = bool(options.get('reduceOnly'))
+        expected = float(options.get('expected_price') or actual)
+        timestamp = order.get('updateTime', order.get('time'))
+        stamp = (datetime.fromtimestamp(timestamp / 1000, timezone.utc) if timestamp else datetime.now(timezone.utc)).isoformat()
+        trade = record.get('trade') or {'id': str(order['orderId']), 'client_id': order['clientOrderId'],
+            'timestamp': stamp, 'symbol': symbol, 'side': side, 'amount': filled, 'price': actual,
+            'reduceOnly': reducing, 'fee_usdt': 0., 'pnl_usdt': 0., 'accounting_status': 'pending',
+            'balance_usdt': self.balance, 'mode': self.mode, 'recovered': recovered,
+            'protection_status': 'unconfirmed' if not reducing else 'closed',
+            'emergency': bool(self.execution_fault), 'signal_id': options.get('signal_id')}
+        # A later cumulative fill invalidates provisional/previous accounting.
+        if trade['amount'] != filled:
+            trade.update(amount=filled, price=actual, fee_usdt=0., pnl_usdt=0., accounting_status='pending')
+        pos = record.get('position')
+        if not reducing:
+            if recovered and any(k not in options for k in ('leverage', 'risk_cfg', 'exit_atr')):
+                raise ExecutionUnknown()  # Legacy history needs explicit recovery; never invent ATR/leverage.
+            leverage = options.get('leverage', self.cfg['leverage'])
+            risk_cfg = copy.deepcopy(options.get('risk_cfg', self.cfg))
+            if symbol in self.brackets:
+                bracket = bracket_for(self.brackets[symbol], actual * filled)
+                risk_cfg['tp_sl'].update(mmr=float(bracket['maintMarginRatio']), maintenance_amount=float(bracket.get('cum', 0)), quantity=filled)
+            if pos is None or pos['amount'] != filled:
+                previous_pos = pos
+                pos = make_position(side, actual, filled, leverage,
+                    options.get('exit_atr', actual * self.cfg['atr']['fallback_atr_pct']), risk_cfg,
+                    options.get('equity', self.equity), self.fee_rate,
+                    opened_at=datetime.fromisoformat(stamp).timestamp(),
+                    signal_id=pos.get('signal_id') if pos else order['clientOrderId'],
+                    atr_source=options.get('atr_source', 'fallback'))
+                if previous_pos:
+                    pos['protection'] = copy.deepcopy(previous_pos.get('protection', {}))
+                    sm = 1 if side == 'buy' else -1
+                    if sm * (previous_pos['sl'] - pos['sl']) > 0: pos['sl'] = previous_pos['sl']
+                    for field in ('breakeven_armed', 'trail_moved'):
+                        pos[field] = previous_pos.get(field, False)
+                pos.update(margin=filled * actual / leverage, entry_order_id=str(order['orderId']),
+                    client_order_id=order['clientOrderId'], accounting_status=trade['accounting_status'],
+                    expected_entry=expected, actual_entry=actual,
+                    entry_slippage_bps=entry_slippage_bps(expected, actual, side),
+                    mmr=risk_cfg['tp_sl']['mmr'], maintenance_amount=risk_cfg['tp_sl'].get('maintenance_amount', 0))
+            trade.update(leverage=pos['leverage'], margin=pos['margin'], signal_id=pos['signal_id'],
+                planned_sl=pos['stop_initial'], planned_tp=pos['tp'], entry_time=stamp,
+                expected_entry=expected, actual_entry=actual, entry_slippage_bps=pos['entry_slippage_bps'])
+            record['position'] = pos
+            self.pending_protection[symbol] = pos
+        else:
+            opening = next((r.get('position') for r in reversed(list(self.executions.values()))
+                            if r['symbol'] == symbol and r.get('position')), None)
+            trade.update(exit_time=stamp, expected_exit=expected, actual_exit=actual,
+                exit_reason=options.get('exit_reason', trade.get('exit_reason', 'recovered_close')),
+                exit_position=copy.deepcopy(options.get('exit_position') or opening),
+                exit_slippage_bps=exit_slippage_bps(expected, actual, 'sell' if side == 'buy' else 'buy'))
+            if opening:
+                trade.update(leverage=opening['leverage'], margin=opening['margin'],
+                    entry_order_id=opening['entry_order_id'], entry_time=datetime.fromtimestamp(opening['opened_at'], timezone.utc).isoformat(),
+                    planned_sl=opening['stop_initial'], planned_tp=opening['tp'],
+                    actual_protection=copy.deepcopy(opening.get('protection', {})))
+        record['trade'] = trade
+        # Commit execution truth before any userTrades request or protection HTTP.
+        self._flush_executions()
+        self._upsert_trade(trade)
+        if not reducing:
+            remote = [p for p in await self.get_position(symbol) if float(p['positionAmt']) != 0]
+            if remote:
+                liquidation = float(remote[0]['liquidationPrice'])
+                margin = self.cfg['tp_sl']['liq_safety_margin']
+                safe = pos['sl'] > liquidation * (1 + margin) if side == 'buy' else pos['sl'] < liquidation * (1 - margin)
+                if liquidation <= 0 or not safe: raise ExecutionUnknown()
+                await self.protect(symbol, pos)
+                trade['actual_protection'] = copy.deepcopy(pos['protection'])
+                trade['protection_status'] = 'confirmed'
+                record['position'] = pos
+                self._flush_executions()
+                self._upsert_trade(trade)
+            elif not recovered:
+                raise ExecutionUnknown()
+        await self.sync_accounting()
+        if not reducing and pos and any(float(p['positionAmt']) != 0 for p in await self.get_position(symbol)):
+            await self.protect(symbol, pos)
+        return {**record['trade'], 'average': actual, 'filled': filled, 'status': 'closed',
+                **({'risk_position': pos} if pos else {})}
+
+    async def recover_execution(self):
+        """Called under runtime lock before reconciliation, on startup and periodically."""
+        unresolved = False
+        for client_id, intent in list(self.intents.items()):
+            if intent['status'] == 'rejected' or intent['type'] != 'market': continue
+            options = intent.get('params', {})
+            if options.get('brackets'): self.brackets[intent['symbol']] = options['brackets']
+            record = self.executions.get(self.execution_key(intent['symbol'], intent.get('order_id')))
+            if record and record.get('order', {}).get('status') in TERMINAL and (record.get('trade') or float(record['order'].get('executedQty', 0)) == 0):
+                if record.get('trade'): self._upsert_trade(record['trade'])
+                continue
+            order = await self.query_order_by_client_id(intent['symbol'], client_id)
+            if not order:
+                unresolved = True
+                continue
+            self.resolve_intent(client_id, order)
+            self._remember_order(intent['symbol'], order, options, intent['side'])
+            if float(order.get('executedQty', 0)) > 0:
+                await self._accept_fill(intent['symbol'], order, options, intent['side'], recovered=True)
+            if order.get('status') not in TERMINAL: unresolved = True
+        await self.sync_accounting()
+        return not unresolved
+
+    async def settle_before_close(self, symbol):
+        """Cancel/confirm a live remainder before sending a new reducing order."""
+        for client_id, intent in list(self.intents.items()):
+            if intent['symbol'] != symbol or intent['type'] != 'market' or intent['status'] == 'rejected': continue
+            record = self.executions.get(self.execution_key(symbol, intent.get('order_id')))
+            if record and record['order'].get('status') in TERMINAL: continue
+            order = await self.query_order_by_client_id(symbol, client_id)
+            if not order: raise ExecutionUnknown()
+            if order.get('status') not in TERMINAL:
+                try: await self.cancel_order(symbol, order_id=order['orderId'])
+                except ExchangeError: pass  # Confirm the same order, even if DELETE response was lost.
+                order = await self.query_order_by_client_id(symbol, client_id)
+                if not order or order.get('status') not in TERMINAL: raise ExecutionUnknown()
+            self.resolve_intent(client_id, order)
+            self._remember_order(symbol, order, intent.get('params', {}), intent['side'])
+            if float(order.get('executedQty', 0)) > 0:
+                await self._accept_fill(symbol, order, intent.get('params', {}), intent['side'], recovered=True)
+
+    async def create_order(self, symbol, type, side, amount, params=None):
+        try:
+            return await self._create_order(symbol, type, side, amount, params)
+        except Exception as error:
+            self.execution_fault = 'order_execution_uncertain'
+            for record in self.executions.values():
+                if record['symbol'] == symbol and record.get('trade') and not record['trade']['reduceOnly']:
+                    record['trade']['emergency'] = True
+            latest = next((i for i in reversed(list(self.intents.values())) if i['symbol'] == symbol), {})
+            self.journal.log('order_execution_failed', symbol=symbol, stage='execution',
+                order_id=latest.get('order_id'), client_order_id=latest.get('params', {}).get('newClientOrderId'),
+                error_type=type_name(error), http_status=getattr(error, 'status', 0),
+                exchange_error_code=getattr(error, 'code', 0), recovery_action='reconcile_before_resend')
+            raise
+
+    async def _create_order(self, symbol, type, side, amount, params=None):
+        options = copy.deepcopy(params or {})
+        # Resolve previous same-symbol ambiguity before considering another send.
+        for client_id, intent in list(self.intents.items()):
+            if intent['symbol'] != symbol or intent['type'] != 'market' or intent['status'] == 'rejected': continue
+            record = self.executions.get(self.execution_key(intent['symbol'], intent.get('order_id')))
+            if not record or record['order'].get('status') not in TERMINAL or not record.get('trade'):
+                await self.recover_execution()
+                record = self.executions.get(self.execution_key(symbol, intent.get('order_id')))
+                if not record or record['order'].get('status') not in TERMINAL:
+                    raise ExecutionUnknown()
+        if not options.get('reduceOnly'):
+            if self.execution_fault: raise ExecutionUnknown()
+            # Runtime selected/confirmed with current equity before computing size.
+            if any(float(p['positionAmt']) != 0 for p in await self.get_position(symbol)):
+                raise ExecutionUnknown()
+            choice = self.selected_leverage.get(symbol)
+            if self.cfg['exchange'].get('leverage_policy') == 'maximum_by_bracket':
+                if not choice or not choice['confirmed']: raise ValueError('Leverage must be selected and confirmed before sizing')
+                amount = choice['amount']
+                leverage = choice['leverage']
+                risk_cfg = copy.deepcopy(self.cfg)
+                bracket = bracket_for(self.brackets[symbol], amount * float(options['expected_price']))
+                risk_cfg['tp_sl'].update(mmr=float(bracket['maintMarginRatio']),
+                    maintenance_amount=float(bracket.get('cum', 0)), quantity=amount)
+            else:
+                leverage, risk_cfg = self.leverage, self.cfg
+                await self.set_leverage(leverage, symbol)
+            options.update(leverage=leverage, risk_cfg=risk_cfg, equity=self.equity, brackets=self.brackets.get(symbol))
+            expected = float(options.get('expected_price') or (await self.fetch_ticker(symbol))['last'])
+            options['expected_price'] = expected
+            make_position(side, expected, amount, leverage,
+                options.get('exit_atr', expected * self.cfg['atr']['fallback_atr_pct']), risk_cfg, self.equity, self.fee_rate)
+            market = self.market(symbol)
+            if amount < market['limits']['amount']['min'] or amount * expected < market['limits']['cost']['min']:
+                raise ValueError('Order below exchange minimum; size is never increased')
+            if amount * expected / leverage + amount * expected * self.fee_rate > self.free:
+                raise ValueError('Insufficient actual available margin including entry fee')
+        else:
+            remote = [p for p in await self.get_position(symbol) if float(p['positionAmt']) != 0]
+            if not remote: raise ExecutionUnknown()
+            residual = float(remote[0]['positionAmt'])
+            if (residual > 0) != (side == 'sell'): raise ValueError('Close side does not reduce actual position')
+            amount = min(amount, abs(residual))
+        result = await safe_create_order(self, {'symbol': symbol, 'type': type, 'side': side, 'amount': amount, 'params': options}, self.journal)
+        self._remember_order(symbol, result, options, side)
+        try:
+            result = await self.settle_fill(symbol, result)
+        except ExecutionUnknown:
+            latest = self.intents[result['clientOrderId']].get('response', result)
+            if float(latest.get('executedQty', 0)) > 0:
+                await self._accept_fill(symbol, latest, options, side)
+            raise
+        trade = await self._accept_fill(symbol, result, options, side)
+        await self.refresh_account()
+        if options.get('reduceOnly') and symbol in self.positions: raise ExecutionUnknown()
+        return trade
+
+
+def type_name(error):
+    # Type only: exception messages can include signed URLs and credentials.
+    return error.__class__.__name__

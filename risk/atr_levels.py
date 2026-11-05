@@ -26,7 +26,7 @@ def compute_tp_sl(side: str, entry: float, atr: float, leverage: float, cfg: dic
     max_dist = entry * max_pct
     # The multiplicative short validation is slightly stricter than the additive
     # distance cap. Respect BOTH, with an inward floating-point boundary.
-    liq = compute_liq_price(side, entry, leverage, cfg["mmr"])
+    liq = compute_liq_price(side, entry, leverage, cfg["mmr"], cfg.get('maintenance_amount', 0), cfg.get('quantity', 1))
     boundary = liq * (1 + sm * cfg["liq_safety_margin"])
     strict_dist = sm * (entry - math.nextafter(boundary, entry))
     safe_dist = min(max_dist, strict_dist)
@@ -45,7 +45,7 @@ def compute_tp_sl(side: str, entry: float, atr: float, leverage: float, cfg: dic
     while sm * (entry - stop) / entry > max_pct:
         stop = math.nextafter(stop, entry)
     distance = sm * (entry - stop)
-    if not validate_stop_against_liq(side, entry, stop, leverage, cfg["mmr"], cfg["liq_safety_margin"]):
+    if not validate_stop_against_liq(side, entry, stop, leverage, cfg["mmr"], cfg["liq_safety_margin"], cfg.get("maintenance_amount", 0), cfg.get("quantity", 1)):
         raise RuntimeError("Computed stop violates liquidation constraint")
     tp_distance = max(atr * cfg["atr_tp_mult"], distance * cfg["min_rr"])
     tp = entry + sm * tp_distance

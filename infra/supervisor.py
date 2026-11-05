@@ -134,8 +134,7 @@ class SafetySupervisor:
                 if not self.bot.exchange.positions and not remaining_orders:
                     for symbol in list(self.bot.positions):
                         if not await self.bot.adopt_native_close(symbol):
-                            self.bot.remove_position(symbol)
-                            await self.event('kill_phantom_removed', 'warning', symbol=symbol)
+                            await self.event('kill_phantom_retained', 'warning', symbol=symbol)
                     break
             except Exception:
                 await self.event('kill_exchange_unreachable', 'critical', reason=reason)
@@ -146,6 +145,18 @@ class SafetySupervisor:
 
     async def reconcile_once(self):
         from exchange.reconciler import reconcile
+        if self.live:
+            if not await self.bot.exchange.recover_execution():
+                await self.trip('pending_order_review')
+                return False
+            self.bot.merge_execution_state()
+            try:
+                for symbol, pos in list(self.bot.positions.items()):
+                    if symbol in self.bot.exchange.positions:
+                        await self.bot.exchange.protect(symbol, pos)
+            except Exception:
+                await self.trip('protection_recovery_failed')
+                return False
         report = await reconcile(self.bot.exchange, self.bot, self.journal)
         if any(report.values()):
             if self.evidence:
@@ -177,16 +188,6 @@ class SafetySupervisor:
             await asyncio.gather(worker, return_exceptions=True)
         if not await self.reconcile_once():
             raise ValueError('Reconciliation changed state; review and reset the latch before restart')
-        # Resolve durable pending intents conservatively before allowing entries.
-        for client_id, intent in self.bot.exchange.intents.items():
-            if intent['status'] != 'pending': continue
-            order = await self.bot.exchange.query_order_by_client_id(intent['symbol'], client_id)
-            if order:
-                self.bot.exchange.resolve_intent(client_id, order)
-                await self.event('order_adopted_on_restart', 'warning', symbol=intent['symbol'], client_id=client_id)
-            # Even confirmed absence after restart is not permission to resend.
-            await self.trip('pending_order_review')
-            raise ValueError('Unresolved order intent requires operator review')
         for symbol, pos in self.bot.positions.items():
             await self.bot.exchange.protect(symbol, pos)
         if self.kill.triggered:

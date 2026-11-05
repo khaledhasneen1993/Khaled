@@ -15,6 +15,10 @@ class ExecutionUnknown(ExchangeError):
 
 async def safe_create_order(exchange, order_params, journal):
     params = dict(order_params)
+    # A pending or observed-but-unsettled POST is never permission to send again.
+    for intent in getattr(exchange, 'intents', {}).values():
+        if intent['symbol'] == params['symbol'] and intent['type'] == params['type'] and intent['status'] == 'pending':
+            raise ExecutionUnknown()
     options = dict(params.get('params') or {})
     attempts = exchange.cfg['exchange']['order_attempts']
     for attempt in range(attempts):
@@ -46,7 +50,7 @@ async def safe_create_order(exchange, order_params, journal):
             # Only definite exchange rejection can justify a fresh order ID.
             status = getattr(error, 'status', 0)
             code = getattr(error, 'code', 0)
-            rejected = status in (418, 429) or (400 <= status < 500 and code not in (-1006, -1007))
+            rejected = status in (418, 429) or (400 <= status < 500 and status != 408 and code not in (-1006, -1007, -4111))
             if not definitive_absence or not rejected:
                 raise ExecutionUnknown() from None
             exchange.reject_intent(client_id)

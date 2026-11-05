@@ -30,6 +30,15 @@ def can_open(state, symbol, side, new_notional, cfg):
     # Config explicitly specifies the basis. Notional is the conservative default
     # for callers supplying the example dictionary without a basis field.
     divisor = cfg['leverage'] if cfg.get('basis', 'notional') == 'margin' else 1
+    if cfg.get('basis') == 'margin':
+        exp = {'long': 0., 'short': 0., 'gross': 0.}
+        for pos in state.open_positions.values():
+            margin = pos['entry'] * pos['amount'] / pos.get('leverage', cfg['leverage'])
+            exp['long' if direction(pos['side']) > 0 else 'short'] += margin
+            exp['gross'] += margin
+        # New exposure is explicitly a margin amount when using variable leverage.
+        new_notional /= cfg.get('candidate_leverage', cfg['leverage'])
+        divisor = 1
     name = 'long' if direction(side) > 0 else 'short'
     tolerance = math.ulp(state.equity)
     if (exp[name] + new_notional) / divisor > cfg[f'max_{name}_exposure_pct'] * state.equity + tolerance:

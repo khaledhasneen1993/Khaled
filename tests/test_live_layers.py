@@ -99,11 +99,11 @@ def test_reconcile_orphan_close():
     remote.create_order.assert_awaited_once_with('BTCUSDT', 'market', 'sell', 1., params={'reduceOnly': True})
 
 
-def test_reconcile_phantom_removed():
+def test_reconcile_phantom_retained_for_review():
     state = reconciliation_state({'BTCUSDT': {'amount': 1., 'entry': 100., 'side': 'buy'}})
     report = run(reconcile(remote_exchange([]), state, Mock()))
     assert report['phantom_positions'] == ['BTCUSDT']
-    assert not state.open_positions
+    assert 'BTCUSDT' in state.open_positions  # Keep strategy facts until exit attribution.
 
 
 def test_reconcile_size_mismatch():

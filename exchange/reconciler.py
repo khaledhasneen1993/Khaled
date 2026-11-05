@@ -20,8 +20,8 @@ async def reconcile(exchange, state, journal):
         if hasattr(state, 'adopt_native_close') and await state.adopt_native_close(symbol):
             continue
         report['phantom_positions'].append(symbol)
-        state.remove_position(symbol)
-        journal.log('phantom_removed', symbol=symbol)
+        # Preserve strategy metadata until a remote exit can be attributed.
+        journal.log('phantom_retained_for_review', symbol=symbol)
     for symbol in set(local) & set(remote):
         pos, actual = local[symbol], remote[symbol]
         qty, entry = abs(float(actual['positionAmt'])), float(actual['entryPrice'])
@@ -38,6 +38,9 @@ async def reconcile(exchange, state, journal):
     remote_orders = await exchange.get_open_orders()
     remote_ids = {o['clientOrderId'] for o in remote_orders}
     for symbol, pos in list(local.items()):
+        if hasattr(exchange, 'protect') and symbol in remote:
+            for name in ('sl', 'tp'):
+                if name not in pos.get('protection', {}): report['missing_protection'].append(symbol + ':' + name)
         for protection in pos.get('protection', {}).values():
             if protection['clientOrderId'] in remote_ids: continue
             # A native fill can race the account/open-order snapshots. Confirm
