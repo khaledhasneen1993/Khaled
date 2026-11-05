@@ -1,6 +1,6 @@
 {
   "name": "Khaled Cascade Hunter",
-  "version": "3.1.0",
+  "version": "3.1.1",
   "status": "approved_source_baseline",
   "python": ">=3.11",
   "primary_entrypoint": "run_bot.py",
@@ -75,7 +75,8 @@
       "/fapi/v1/exchangeInfo": 1,
       "/fapi/v1/klines": 2,
       "/fapi/v1/depth": 2,
-      "/fapi/v1/openAlgoOrders": 40
+      "/fapi/v1/openAlgoOrders": 40,
+      "/fapi/v1/userTrades": 5
     },
     "weight_per_minute": 1800,
     "orders_per_10sec": 200,
@@ -96,7 +97,8 @@
       -4202,
       -4209
     ],
-    "trade_max_pages": 20
+    "trade_max_pages": 20,
+    "session_guard_filename": "session_guard.json"
   },
   "kill_switch": {
     "daily_dd_limit_pct": 0.05,

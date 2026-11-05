@@ -12,6 +12,7 @@ class OperationalJournal:
               'stage', 'client_order_id', 'error_type', 'http_status', 'exchange_error_code', 'recovery_action'}
 
     def __init__(self, root):
+        self.failed = False
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
 
@@ -19,10 +20,15 @@ class OperationalJournal:
         record = {'timestamp': datetime.now(timezone.utc).isoformat(), 'event': event,
                   **{k: v for k, v in values.items() if k in self.fields}}
         name = 'kill_events.log' if event.startswith('kill') else 'events.log'
-        with (self.root / name).open('a', encoding='utf-8') as stream:
-            stream.write(json.dumps(record, allow_nan=False) + '\n')
-            stream.flush()
-            os.fsync(stream.fileno())
+        try:
+            with (self.root / name).open('a', encoding='utf-8') as stream:
+                stream.write(json.dumps(record, allow_nan=False) + '\n')
+                stream.flush()
+                os.fsync(stream.fileno())
+        except OSError:
+            self.failed = True
+            return False
+        return True
 
     def last_n(self, n):
         return []  # Trade analytics are read from the persisted account ledger.

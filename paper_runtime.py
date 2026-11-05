@@ -59,6 +59,7 @@ class DynamicPaperHunter(dynamic.CascadeHunter, PaperState):
         self._notifications = []
         self._state_lock = None
         self._owns_state = self.execution_mode == "paper"
+        self._management_authorized = False
         self.safety = SafetySupervisor(self)
         if self.execution_mode != "paper":
             self.exchange.on_api_error = self.safety.kill.on_api_error
@@ -98,10 +99,11 @@ class DynamicPaperHunter(dynamic.CascadeHunter, PaperState):
             return False
         result = await self.strategy.CascadeHunter.enter(self, symbol, side, float(price))
         if getattr(self.exchange, "execution_fault", None):
+            await self.exchange.refresh_account()
             # CascadeHunter preserves its public False-on-failure contract. The
             # live runtime still latches and handles actual possible fills.
             for pending_symbol, pending in self.exchange.pending_protection.items():
-                if pending_symbol not in self.positions:
+                if pending_symbol in self.exchange.positions and pending_symbol not in self.positions:
                     self.positions[pending_symbol] = pending
             await self.safety.trip(self.exchange.execution_fault)
         elif self.safety.kill.triggered and self.safety.active:
@@ -130,25 +132,53 @@ class DynamicPaperHunter(dynamic.CascadeHunter, PaperState):
                         self.positions[symbol]['sl'] = pos['sl']
                     self.positions[symbol]['entry_fee'] = pos['entry_fee']
                     self.positions[symbol]['accounting_status'] = pos.get('accounting_status', 'pending')
-        for trade in live.trades:
-            if trade.get('exit_position') and trade.get('accounting_status') == 'complete' and not trade.get('exit_detail'):
-                stored = trade['exit_position']
-                entry = next((r.get('position') for r in live.executions.values()
-                              if r.get('position', {}).get('signal_id') == stored['signal_id']), None)
-                closes = [t for t in live.trades if t.get('reduceOnly') and t.get('signal_id') == stored['signal_id']]
-                if entry and entry.get('accounting_status') == 'complete' and all(t.get('accounting_status') == 'complete' for t in closes):
-                    stored['entry_fee'] = entry['entry_fee']
-                    fee = sum(t['fee_usdt'] for t in closes)
-                    amount = sum(t['amount'] for t in closes)
-                    price = sum(t['amount'] * t['price'] for t in closes) / amount
-                    trade['exit_detail'] = exit_record(Position(stored), trade['exit_reason'], price,
-                        datetime.fromisoformat(trade['timestamp']).timestamp(), fee)
-                    trade['exit_detail']['net_pnl_usdt'] = sum(t['pnl_usdt'] for t in closes) - fee - entry['entry_fee']
-                    self._notifications.append(trade)
-            if trade.get('reduceOnly') and trade.get('exit_reason'):
-                symbol = trade['symbol']
-                if symbol in self.positions and symbol not in live.positions:
-                    self.record_exit_reason(symbol, trade['exit_reason'], trade['price'])
+        self.finalize_closed_trades()
+
+    def finalize_closed_trades(self):
+        """One position result, only after exact exit quantity and accounting."""
+        from paper_account import Position
+        exchange = self.exchange
+        groups = {}
+        for trade in exchange.trades:
+            if trade.get('reduceOnly') and trade.get('signal_id'):
+                groups.setdefault(trade['signal_id'], []).append(trade)
+        for signal_id, closes in groups.items():
+            final = closes[-1]
+            stored = final.get('exit_position')
+            if not stored: continue
+            entry = next((r.get('position') or r.get('entry_facts') for r in exchange.executions.values()
+                          if (r.get('position') or r.get('entry_facts') or {}).get('signal_id') == signal_id), None)
+            entry = entry or stored
+            quantity = sum(t['amount'] for t in closes)
+            if not math.isclose(quantity, entry['amount'], rel_tol=self.cfg['exchange']['fill_qty_tolerance_pct'], abs_tol=0):
+                continue
+            active = self.positions.get(final['symbol'])
+            if active and active.get('signal_id') == signal_id and final['symbol'] in exchange.positions: continue
+            if entry.get('accounting_status') != 'complete' or any(t.get('accounting_status') != 'complete' for t in closes): continue
+            if not final.get('exit_detail'):
+                stored = dict(stored, entry_fee=entry['entry_fee'])
+                fees = sum(t['fee_usdt'] for t in closes)
+                price = sum(t['amount'] * t['price'] for t in closes) / quantity
+                reason = final.get('exit_reason', 'recovered_close')
+                reason = {'SL': 'stop_loss', 'TP': 'take_profit'}.get(reason, reason)
+                final['exit_detail'] = exit_record(Position(stored), reason, price,
+                    datetime.fromisoformat(final['timestamp']).timestamp(), fees)
+                from decimal import Decimal
+                fee_total = sum((Decimal(t.get('fee_exact', str(t['fee_usdt']))) for t in closes), Decimal(0))
+                realized = sum((Decimal(t.get('realized_pnl_exact', str(t['pnl_usdt']))) for t in closes), Decimal(0))
+                entry_trade = next((t for t in exchange.trades if not t.get('reduceOnly') and t.get('signal_id') == signal_id), {})
+                entry_fee = Decimal(entry_trade.get('fee_exact', str(entry['entry_fee'])))
+                net = realized - fee_total - entry_fee
+                final['exit_detail'].update(net_pnl_usdt=float(net), net_pnl_exact=str(net),
+                    entry_fee_exact=str(entry_fee), exit_fee_exact=str(fee_total), realized_pnl_exact=str(realized))
+                for key in ('expected_entry', 'actual_entry', 'entry_slippage_bps'):
+                    final['exit_detail'][key] = final[key] = stored.get(key, stored['entry'] if key != 'entry_slippage_bps' else 0.)
+                for key in ('expected_exit', 'actual_exit', 'exit_slippage_bps'):
+                    if key in final: final['exit_detail'][key] = final[key]
+                final['exit_detail']['actual_exit'] = price
+            key = self.safety.close_key(final)
+            if key not in self.safety.accounted_closes and not any(self.safety.close_key(t) == key for t in self._notifications):
+                self._notifications.append(final)
 
     def record_entry_signal(self, symbol, signal):
         for trade in reversed(self.exchange.trades):
@@ -162,6 +192,14 @@ class DynamicPaperHunter(dynamic.CascadeHunter, PaperState):
                 break
 
     def record_exit_reason(self, symbol, reason, trigger_price):
+        if self.execution_mode != 'paper':
+            position = self.positions[symbol]
+            for trade in reversed(self.exchange.trades):
+                if trade.get('reduceOnly') and trade['symbol'] == symbol and trade.get('signal_id') == position['signal_id']:
+                    trade.update(exit_reason=reason, trigger_price=float(trigger_price), exit_position=dict(position))
+                    break
+            self.finalize_closed_trades()
+            return
         for trade in reversed(self.exchange.trades):
             if trade["symbol"] == symbol and trade["reduceOnly"]:
                 trade["exit_reason"] = reason
@@ -237,9 +275,11 @@ class DynamicPaperHunter(dynamic.CascadeHunter, PaperState):
             self.record_exit_reason(symbol, reason, price)
             self.positions.pop(symbol, None)
         if self.execution_mode != "paper":
+            self.exchange.clear_active_protection(symbol)
             for order in await self.exchange.get_open_orders(symbol):
                 if order.get("is_algo"): await self.exchange.cancel_algo(order)
                 else: await self.exchange.cancel_order(symbol, order_id=order["orderId"])
+        if self.execution_mode != 'paper': self.finalize_closed_trades()
         self.persist_execution_metadata()
         await self._drain_notifications()
         self.save()
@@ -303,7 +343,7 @@ class DynamicPaperHunter(dynamic.CascadeHunter, PaperState):
         self.record_exit_reason(symbol, reason, closes[-1]['price'])
         self.persist_execution_metadata()
         self.positions.pop(symbol)
-        self.exchange.pending_protection.pop(symbol, None)
+        self.exchange.clear_active_protection(symbol, pos['signal_id'])
         for remaining in await self.exchange.get_open_orders(symbol):
             if remaining.get('is_algo'): await self.exchange.cancel_algo(remaining)
         await self._drain_notifications()
@@ -367,7 +407,7 @@ class DynamicPaperHunter(dynamic.CascadeHunter, PaperState):
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
             try:
-                if self._owns_state and self.execution_mode != "paper" and getattr(self.exchange, "markets", None):
+                if self._owns_state and self._management_authorized and self.execution_mode != "paper" and getattr(self.exchange, "markets", None):
                     shutdown_worker = asyncio.create_task(self.safety.alerter._worker())
                     try:
                         reason = "process_shutdown" if cause in (None, asyncio.CancelledError, KeyboardInterrupt) else "runtime_failure"

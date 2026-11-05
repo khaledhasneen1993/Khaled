@@ -93,6 +93,24 @@ class LiveExchange(DurableExecution, PaperExchange):
         protection_path = self.intent_path.parent / 'protection.json'
         if protection_path.exists(): self.pending_protection = json.loads(protection_path.read_text())
         self.execution_fault = None
+        self.emergency_mode = False
+        self.storage_fault = False
+
+    def write_state(self, path, value):
+        try:
+            atomic_json(path, value)
+        except OSError:
+            self.storage_fault = True
+            self.execution_fault = 'storage_failure'
+            if not self.emergency_mode: raise
+            # Emergency reducing operations retain stable IDs in memory. Disk
+            # durability is impossible until storage recovers; never claim it.
+
+    def clear_active_protection(self, symbol, signal_id=None):
+        pos = self.pending_protection.get(symbol)
+        if pos and (signal_id is None or pos.get('signal_id') == signal_id):
+            self.pending_protection.pop(symbol)
+            self.write_state(self.intent_path.parent / 'protection.json', self.pending_protection)
 
     @property
     def equity(self): return self._equity
@@ -107,19 +125,19 @@ class LiveExchange(DurableExecution, PaperExchange):
             'params': {k: v for k, v in params['params'].items() if k in
                        ('reduceOnly', 'expected_price', 'exit_atr', 'atr_source', 'stopPrice', 'round_up', 'newClientOrderId', 'signal_id', 'leverage', 'risk_cfg', 'equity', 'brackets', 'exit_reason', 'exit_position')},
             'status': 'pending'}
-        atomic_json(self.intent_path, self.intents)
+        self.write_state(self.intent_path, self.intents)
         self.journal.log('order_intent_saved', stage='before_post', symbol=params['symbol'], client_order_id=client_id, recovery_action='query_same_id')
 
     def resolve_intent(self, client_id, result):
         self.intents[client_id]['status'] = 'observed'
         self.intents[client_id]['order_id'] = result.get('orderId', result.get('algoId'))
         self.intents[client_id]['response'] = result
-        atomic_json(self.intent_path, self.intents)
+        self.write_state(self.intent_path, self.intents)
         self.journal.log('order_observed', stage='order_query_or_response', symbol=self.intents[client_id]['symbol'], client_order_id=client_id, order_id=self.intents[client_id]['order_id'])
 
     def reject_intent(self, client_id):
         self.intents[client_id]['status'] = 'rejected'
-        atomic_json(self.intent_path, self.intents)
+        self.write_state(self.intent_path, self.intents)
 
     def _sign(self, params):
         value = {**params, 'timestamp': int(time.time() * 1000 + self.clock_offset_ms),
@@ -346,19 +364,32 @@ class LiveExchange(DurableExecution, PaperExchange):
             old = pos.get('protection', {}).get(name)
             # Stop rounds toward entry; TP rounds away, preserving planned RR.
             round_up = pos['side'] == 'buy'
+            if name == 'sl' and old:
+                sm = 1 if pos['side'] == 'buy' else -1
+                if sm * (target - float(old['trigger'])) < 0:
+                    target = pos['sl'] = float(old['trigger'])
             trigger = self._price(symbol, target, round_up)
             if old and old['trigger'] == trigger and old.get('amount') == pos['amount']: continue
             result = await safe_create_order(self, {'symbol': symbol, 'type': kind, 'side': side,
                 'amount': pos['amount'], 'params': {'reduceOnly': True, 'stopPrice': float(trigger), 'round_up': round_up}}, self.journal)
             client_id = result['clientAlgoId']
             confirmed = await self.query_order_by_client_id(symbol, client_id)
-            if not confirmed or confirmed.get('algoStatus') not in ('NEW',):
+            expected_qty = Decimal(self.amount_to_precision(symbol, pos['amount']))
+            if (not confirmed or confirmed.get('algoStatus') != 'NEW'
+                    or confirmed.get('clientAlgoId') != client_id
+                    or str(confirmed.get('algoId')) != str(result['algoId'])
+                    or confirmed.get('symbol') != self.raw(symbol)
+                    or confirmed.get('side') != side.upper()
+                    or confirmed.get('orderType') != kind
+                    or confirmed.get('reduceOnly') not in (True, 'true')
+                    or Decimal(str(confirmed.get('quantity', 0))) != expected_qty
+                    or Decimal(str(confirmed.get('triggerPrice', 0))) != Decimal(trigger)):
                 raise ExecutionUnknown()
             new = {'orderId': result['algoId'], 'clientOrderId': client_id, 'trigger': trigger, 'is_algo': True, 'amount': pos['amount']}
             pos.setdefault('protection', {})[name] = new
             # Persist new protection before removing any old order.
             self.pending_protection[symbol] = pos
-            atomic_json(self.intent_path.parent / 'protection.json', self.pending_protection)
+            self.write_state(self.intent_path.parent / 'protection.json', self.pending_protection)
             for record in self.executions.values():
                 if record['symbol'] == symbol and record.get('position', {}).get('signal_id') == pos['signal_id']:
                     record['position'] = dict(pos)

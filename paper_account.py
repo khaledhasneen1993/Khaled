@@ -235,7 +235,28 @@ class PaperState:
         self.positions = {symbol: Position(pos) for symbol, pos in state["strategy_positions"].items()}
         self.last_trade = state["last_trade"]
         if state.get("operations") and hasattr(self, "safety"):
-            self.safety.restore(state["operations"])
+            self.safety.restore(state['operations'])
+            if getattr(self, 'execution_mode', 'paper') != 'paper' and 'accounted_closes' not in state['operations']:
+                # Upgrade only facts already committed in the legacy state. Do
+                # not apply the same closed-trade PnL to KillSwitch a second time.
+                groups = {}
+                for trade in self.exchange.trades:
+                    if trade.get('reduceOnly') and trade.get('signal_id'):
+                        groups.setdefault(trade['signal_id'], []).append(trade)
+                for closes in groups.values():
+                    reported = [t for t in closes if t.get('exit_detail')]
+                    if not reported: continue
+                    self.safety.accounted_closes.add(self.safety.close_key(reported[-1]))
+                    snapshot = reported[-1].get('exit_position')
+                    quantity = sum(t['amount'] for t in closes)
+                    if len(reported) > 1 or snapshot and not math.isclose(quantity, snapshot['amount'],
+                            rel_tol=self.cfg['exchange']['fill_qty_tolerance_pct'], abs_tol=0):
+                        self.safety.kill.triggered = self.safety.kill.triggered or 'legacy_accounting_review'
+                        self.safety.ready = False
+                        # Keep the original evidence without treating a known
+                        # premature/duplicated result as a fresh final result.
+                        for trade in reported:
+                            trade['legacy_exit_detail'] = trade.pop('exit_detail')
         if getattr(self, 'execution_mode', 'paper') == 'paper' and set(self.positions) != set(self.exchange.positions):
             raise ValueError("Inconsistent saved positions")
 

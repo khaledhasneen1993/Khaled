@@ -29,7 +29,9 @@ def main():
         kill.reset_daily()
         data['operations']['kill'] = kill.dump()
         data['operations']['announced_kill'] = False
+        data['operations']['storage_failed'] = False  # Atomic save below must succeed; no reset on write failure.
         atomic_json(path, data)
+        atomic_json(path.parent / cfg['exchange']['session_guard_filename'], {'active': False, 'reviewed': True})
         OperationalJournal(path.parent / 'journal').log('kill_manual_reset')
     print('Local latch reset. Startup reconciliation and all other gates still apply.')
 

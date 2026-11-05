@@ -31,16 +31,20 @@ class SafetySupervisor:
         self.last_report_day = None
         self.warned = set()
         self.open_orders = {}
+        self.accounted_closes = set()
+        self.storage_failed = False
         self.evidence = None
         if bot.execution_mode in ('testnet', 'mainnet'):
             from exchange.rollout import TestnetEvidence
             self.evidence = TestnetEvidence(self.cfg, bot.execution_mode)
 
     def dump(self):
-        return {'kill': self.kill.dump(), 'last_report_day': self.last_report_day,
+        return {'accounted_closes': sorted(self.accounted_closes), 'storage_failed': self.storage_failed, 'kill': self.kill.dump(), 'last_report_day': self.last_report_day,
                 'announced_kill': 'kill_announced' in self.warned}
 
     def restore(self, value):
+        self.accounted_closes = set(value.get('accounted_closes', []))
+        self.storage_failed = value.get('storage_failed', False)
         self.kill.restore(value['kill'])
         self.last_report_day = value.get('last_report_day')
         if value.get('announced_kill'): self.warned.add('kill_announced')
@@ -50,7 +54,7 @@ class SafetySupervisor:
     async def event(self, name, level='info', **fields):
         if self.journal:
             self.journal.log(name, **fields)
-        await self.alerter.send(name + ' ' + json.dumps(fields, ensure_ascii=False), level)
+        self.alerter.send_nowait(name + ' ' + json.dumps(fields, ensure_ascii=False), level)
 
     def heartbeat(self):
         self.kill.on_ws_heartbeat()
@@ -67,7 +71,7 @@ class SafetySupervisor:
         history.append(spread)
 
     async def allow_entry(self, symbol, side, price):
-        if not self.ready or self.kill.triggered:
+        if not self.ready or self.kill.triggered or self.storage_failed or self.journal.failed:
             return False
         market = self.latest.get(symbol)
         if reason := self.kill.check(self.bot.exchange, market):
@@ -81,9 +85,17 @@ class SafetySupervisor:
             await self.event('exposure_block', 'warning', symbol=symbol, reason=reason)
         return allowed
 
+    @staticmethod
+    def close_key(trade):
+        return ':'.join((trade.get('mode', 'paper'), trade['symbol'], trade.get('signal_id') or str(trade['id'])))
+
     async def closed(self, trade):
+        key = self.close_key(trade)
+        if key in self.accounted_closes: return
+        self.accounted_closes.add(key)
         detail = trade['exit_detail']
         self.kill.on_trade_closed(detail['net_pnl_usdt'])
+        self.save_safely()
         await self.event('trade_closed', symbol=trade['symbol'], reason=detail['exit_reason'], pnl=detail['net_pnl_usdt'])
         if self.kill.check(self.bot.exchange, None):
             # Caller holds the trade lock: monitor will flatten on its next tick.
@@ -94,17 +106,36 @@ class SafetySupervisor:
     def last_n(self, n):
         return [t for t in self.bot.exchange.trades if not t['reduceOnly']][-n:]
 
+    def save_safely(self):
+        try:
+            self.bot.save()
+        except OSError:
+            self.storage_failed = True
+            self.ready = False
+            self.kill.triggered = self.kill.triggered or 'storage_failure'
+            return False
+        return True
+
     async def trip(self, reason):
+        exchange = self.bot.exchange
+        if self.live: exchange.emergency_mode = True
+        try:
+            await self._trip(reason)
+        finally:
+            if self.live: exchange.emergency_mode = False
+
+    async def _trip(self, reason):
         first = self.kill.triggered is None
         self.kill.triggered = self.kill.triggered or reason
         self.ready = False
-        self.bot.save()  # Latch is durable before any market request.
+        self.save_safely()  # Latch is durable before any market request.
         if first or 'kill_announced' not in self.warned:
             self.warned.add('kill_announced')
             if self.evidence and reason not in ('daily_drawdown', 'consecutive_losses', 'spread_spike', 'process_shutdown'):
                 self.evidence.data['technical_kills'] += 1
-                atomic_json(self.evidence.path, self.evidence.data)
-            self.bot.save()
+                try: atomic_json(self.evidence.path, self.evidence.data)
+                except OSError: self.storage_failed = True
+            self.save_safely()
             await self.event('kill_triggered', 'critical', reason=self.kill.triggered)
         # Repeat while latched. Failed flattening never removes remaining stops.
         remaining_orders = []
@@ -132,6 +163,14 @@ class SafetySupervisor:
                     await self.bot.exchange.refresh_account()
                     remaining_orders = await self.bot.exchange.get_open_orders()
                 if not self.bot.exchange.positions and not remaining_orders:
+                    if self.live:
+                        try:
+                            await self.bot.exchange.recover_execution()
+                            self.bot.merge_execution_state()
+                            self.bot.persist_execution_metadata()
+                            await self.bot._drain_notifications()
+                        except Exception:
+                            await self.event('kill_accounting_pending', 'warning')
                     for symbol in list(self.bot.positions):
                         if not await self.bot.adopt_native_close(symbol):
                             await self.event('kill_phantom_retained', 'warning', symbol=symbol)
@@ -141,7 +180,7 @@ class SafetySupervisor:
             await asyncio.sleep(self.cfg['kill_switch']['flatten_retry_sec'])
         if self.bot.exchange.positions or remaining_orders:
             await self.event('kill_flatten_incomplete', 'critical', reason=self.kill.triggered)
-        self.bot.save()
+        self.save_safely()
 
     async def reconcile_once(self):
         from exchange.reconciler import reconcile
@@ -186,6 +225,15 @@ class SafetySupervisor:
         finally:
             worker.cancel()
             await asyncio.gather(worker, return_exceptions=True)
+        # Durable active-session marker survives a full disk or process crash
+        # that prevents the later kill snapshot from being committed.
+        guard_path = self.bot.state_path.parent / self.cfg['exchange']['session_guard_filename']
+        guard = json.loads(guard_path.read_text()) if guard_path.exists() else {}
+        if guard.get('active'):
+            self.kill.triggered = self.kill.triggered or 'unclean_session_review'
+        atomic_json(guard_path, {'active': True, 'mode': self.bot.execution_mode,
+            'started_at': datetime.now(timezone.utc).isoformat()})
+        self.bot._management_authorized = True
         if not await self.reconcile_once():
             raise ValueError('Reconciliation changed state; review and reset the latch before restart')
         for symbol, pos in self.bot.positions.items():
@@ -214,6 +262,8 @@ class SafetySupervisor:
                     if self.live and now - self.last_account >= self.cfg['exchange']['account_refresh_sec']:
                         await self.bot.exchange.refresh_account()
                         self.last_account = now
+                    if self.live and (self.storage_failed or self.journal.failed or self.bot.exchange.journal.failed):
+                        await self.trip('storage_failure')
                     if self.alerter.failed and self.live:
                         await self.trip('alerts_unavailable')
                     if getattr(self.bot.exchange, 'execution_fault', None):

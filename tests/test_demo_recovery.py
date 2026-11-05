@@ -420,7 +420,12 @@ def test_protection_disk_failure_does_not_cancel_original(live):
     old = {'orderId': 1, 'clientOrderId': 'old', 'trigger': '98', 'is_algo': True}
     pos['protection'] = {'sl': old}
     live.submit_order = AsyncMock(side_effect=lambda **kw: {'algoId': 2, 'clientAlgoId': kw['params']['newClientOrderId']})
-    live.query_order_by_client_id = AsyncMock(return_value={'algoStatus': 'NEW'})
+    async def confirmed(symbol, client_id):
+        intent = live.intents[client_id]
+        return {'algoId': 2, 'clientAlgoId': client_id, 'algoStatus': 'NEW', 'symbol': 'BTCUSDT',
+            'side': intent['side'].upper(), 'orderType': intent['type'], 'quantity': str(intent['amount']),
+            'reduceOnly': True, 'triggerPrice': str(intent['params']['stopPrice'])}
+    live.query_order_by_client_id = confirmed
     live.cancel_algo = AsyncMock()
     async def check():
         original = __import__('exchange.live_exchange', fromlist=['atomic_json']).atomic_json

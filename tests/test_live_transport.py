@@ -90,14 +90,19 @@ def test_ambiguous_timeout_absence_never_resubmits(live):
 
 def test_protection_replacement_confirms_new_before_cancel(live):
     events = []
+    accepted = {}
     pos = make_position('buy', 100, 5, 50, .4, live.cfg, 100, .0005)
     pos['protection'] = {'sl': {'orderId': 1, 'clientOrderId': 'kh_old', 'trigger': '99.00', 'is_algo': True}}
     async def submit(**kw):
         events.append(('post', kw['type']))
-        return {'algoId': len(events) + 100, 'clientAlgoId': kw['params']['newClientOrderId']}
+        cid = kw['params']['newClientOrderId']
+        accepted[cid] = {'algoId': len(events) + 100, 'clientAlgoId': cid, 'symbol': 'BTCUSDT',
+            'side': kw['side'].upper(), 'orderType': kw['type'], 'quantity': str(kw['amount']),
+            'reduceOnly': True, 'triggerPrice': str(kw['params']['stopPrice']), 'algoStatus': 'NEW'}
+        return accepted[cid]
     async def query(symbol, client_id):
         events.append(('confirmed', client_id))
-        return {'algoStatus': 'NEW'}
+        return accepted[client_id]
     async def cancel(order): events.append(('cancel', order['orderId']))
     live.submit_order, live.query_order_by_client_id, live.cancel_algo = submit, query, cancel
     async def check():
@@ -242,7 +247,8 @@ class SimulatedBinance:
                 if self.reject_protection: return httpx.Response(400, json={'code': -1111})
                 self.next_algo += 1
                 data = {'algoId': self.next_algo, 'clientAlgoId': p['clientAlgoId'], 'symbol': 'BTCUSDT',
-                    'algoStatus': 'NEW', 'reduceOnly': True, 'triggerPrice': p['triggerPrice']}
+                    'algoStatus': 'NEW', 'reduceOnly': True, 'triggerPrice': p['triggerPrice'],
+                    'side': p['side'], 'quantity': p['quantity'], 'orderType': p['type']}
                 self.algos[self.next_algo] = data
             elif method == 'GET': data = next((a for a in self.algos.values() if a['clientAlgoId'] == p['clientAlgoId']), None)
             elif method == 'DELETE':

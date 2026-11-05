@@ -16,6 +16,19 @@ class TelegramAlerter:
         self.queue = asyncio.Queue(maxsize=cfg['queue_size'])
         self.failed = False
 
+    def send_nowait(self, msg, level='info'):
+        """Trading/flattening must never wait behind a full notification queue."""
+        if not self.enabled: return False
+        text = f'[{level}] {msg}'
+        limit = self.cfg['message_max_chars']
+        try:
+            for offset in range(0, len(text), limit):
+                self.queue.put_nowait(text[offset:offset + limit])
+        except asyncio.QueueFull:
+            self.failed = True
+            return False
+        return True
+
     async def send(self, msg: str, level='info'):
         if not self.enabled:
             return False

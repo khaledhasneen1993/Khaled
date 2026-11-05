@@ -1,6 +1,6 @@
 """ATR levels, with strict liquidation and optional account risk caps."""
 import math
-from .liq_math import direction, compute_liq_price, max_safe_stop_pct, validate_stop_against_liq
+from .liq_math import direction, compute_liq_price, max_safe_stop_pct, validate_stop_against_liq, liquidation_stop_cap
 
 
 def compute_atr(candles: list, period: int = 14) -> float:
@@ -22,7 +22,9 @@ def compute_tp_sl(side: str, entry: float, atr: float, leverage: float, cfg: dic
         raise ValueError("Exit distances must be positive")
     sm = direction(side)
     raw = max(atr * cfg["atr_stop_mult"], entry * cfg["min_stop_pct"])
-    max_pct = max_safe_stop_pct(leverage, cfg["mmr"], cfg["liq_safety_margin"])
+    max_pct = (liquidation_stop_cap(side, entry, leverage, cfg['mmr'], cfg['liq_safety_margin'],
+                    cfg['maintenance_amount'], cfg.get('quantity', 1)) if 'maintenance_amount' in cfg else
+               max_safe_stop_pct(leverage, cfg['mmr'], cfg['liq_safety_margin']))
     max_dist = entry * max_pct
     # The multiplicative short validation is slightly stricter than the additive
     # distance cap. Respect BOTH, with an inward floating-point boundary.
@@ -45,7 +47,7 @@ def compute_tp_sl(side: str, entry: float, atr: float, leverage: float, cfg: dic
     while sm * (entry - stop) / entry > max_pct:
         stop = math.nextafter(stop, entry)
     distance = sm * (entry - stop)
-    if not validate_stop_against_liq(side, entry, stop, leverage, cfg["mmr"], cfg["liq_safety_margin"], cfg.get("maintenance_amount", 0), cfg.get("quantity", 1)):
+    if not validate_stop_against_liq(side, entry, stop, leverage, cfg["mmr"], cfg["liq_safety_margin"], cfg.get("maintenance_amount"), cfg.get("quantity", 1)):
         raise RuntimeError("Computed stop violates liquidation constraint")
     tp_distance = max(atr * cfg["atr_tp_mult"], distance * cfg["min_rr"])
     tp = entry + sm * tp_distance

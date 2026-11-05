@@ -44,8 +44,21 @@ async def preflight(exchange, symbol, websocket=True):
                 ws_ok = message.get('data', {}).get('e') == 'kline'
     state_path = exchange.intent_path.parent / exchange.cfg['demo']['state_filename']
     local_state = json.loads(state_path.read_text()) if state_path.exists() else {}
-    kill = local_state.get('operations', {}).get('kill', {}).get('triggered')
-    return {'local_kill_latch': kill, 'mode': 'demo', 'equity_usdt': exchange.equity, 'available_usdt': exchange.free,
+    operations = local_state.get('operations', {})
+    kill = operations.get('kill', {}).get('triggered')
+    guard_path = exchange.intent_path.parent / exchange.cfg['exchange']['session_guard_filename']
+    guard = json.loads(guard_path.read_text()) if guard_path.exists() else {}
+    storage_failed = operations.get('storage_failed', False)
+    pending_accounting = sum(r.get('trade', {}).get('accounting_status') == 'pending' for r in exchange.executions.values())
+    unresolved = []
+    for client_id, intent in exchange.intents.items():
+        if intent['status'] == 'rejected': continue
+        record = exchange.executions.get(exchange.execution_key(intent['symbol'], intent.get('order_id')))
+        if intent['status'] == 'pending' or (intent['type'] == 'market' and (
+                not record or record['order'].get('status') not in ('FILLED', 'EXPIRED', 'CANCELED', 'REJECTED', 'EXPIRED_IN_MATCH'))):
+            unresolved.append(client_id)
+    return {'session_guard_active': bool(guard.get('active')), 'storage_failed': storage_failed,
+        'unresolved_intents': unresolved, 'pending_accounting': pending_accounting, 'local_kill_latch': kill, 'mode': 'demo', 'equity_usdt': exchange.equity, 'available_usdt': exchange.free,
         'positions': len(exchange.positions), 'regular_orders': sum(not o.get('is_algo') for o in orders),
         'algo_orders': sum(bool(o.get('is_algo')) for o in orders), 'account_can_trade': account.get('canTrade'),
         'symbol': symbol, 'candidate': choice, 'current_symbol_configuration': config,
@@ -53,7 +66,8 @@ async def preflight(exchange, symbol, websocket=True):
         'order_submission_verified': False, 'protection_acceptance_verified': False,
         'apiRestrictions': 'not used; Demo 404 cannot establish permissions',
         'local_pending_intents': sum(i['status'] == 'pending' for i in exchange.intents.values()),
-        'requires_operator_review': bool(exchange.positions or orders or kill or any(i['status'] == 'pending' for i in exchange.intents.values()))}
+        'requires_operator_review': bool(exchange.positions or orders or kill or guard.get('active') or storage_failed or unresolved or pending_accounting
+                                         or account.get('canTrade') is not True or websocket and not ws_ok)}
 
 
 def main():
@@ -67,6 +81,7 @@ def main():
         try:
             result = await preflight(exchange, args.symbol or cfg['demo']['preflight_symbol'])
             print(json.dumps(result, indent=2))
+            if result['requires_operator_review']: raise SystemExit(2)
         finally: await exchange.close()
     try: asyncio.run(run())
     except Exception as error:

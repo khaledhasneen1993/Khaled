@@ -22,7 +22,7 @@ class DurableExecution:
         return symbol + ':' + str(order_id)
 
     def _flush_executions(self):
-        atomic_json(self.execution_path, self.executions)
+        self.write_state(self.execution_path, self.executions)
 
     def _upsert_trade(self, trade):
         old = next((t for t in self.trades if str(t['id']) == str(trade['id']) and t['symbol'] == trade['symbol']), None)
@@ -34,6 +34,8 @@ class DurableExecution:
         previous = self.executions.get(key, {})
         # Never overwrite a larger confirmed cumulative fill with a stale query.
         if float(order.get('executedQty', 0)) < float(previous.get('order', {}).get('executedQty', 0)):
+            return previous
+        if previous.get('order', {}).get('status') in TERMINAL and order.get('status') not in TERMINAL:
             return previous
         record = {**previous, 'symbol': symbol, 'order': order,
                   'options': copy.deepcopy(options), 'side': side}
@@ -92,6 +94,8 @@ class DurableExecution:
             trade.update(fee_usdt=float(fee), pnl_usdt=float(pnl), fee_exact=str(fee),
                          realized_pnl_exact=str(pnl), accounting_status='complete',
                          execution_ids=[str(f.get('id', i)) for i, f in enumerate(fills)])
+            if record.get('entry_facts'):
+                record['entry_facts'].update(entry_fee=float(fee), accounting_status='complete')
             if record.get('position'):
                 record['position']['entry_fee'] = float(fee)
                 record['position']['accounting_status'] = 'complete'
@@ -102,22 +106,32 @@ class DurableExecution:
                 cfg = copy.deepcopy(options.get('risk_cfg', self.cfg))
                 cfg['tp_sl'].update(mmr=pos['mmr'], maintenance_amount=pos['maintenance_amount'], quantity=pos['amount'])
                 effective_fee = max(self.fee_rate, float(fee) / (pos['amount'] * pos['entry']))
-                levels = make_position(pos['side'], pos['entry'], pos['amount'], pos['leverage'], pos['atr_at_entry'],
+                try:
+                    levels = make_position(pos['side'], pos['entry'], pos['amount'], pos['leverage'], pos['atr_at_entry'],
                     cfg, pos['equity_at_entry'], effective_fee)
+                except (ValueError, RuntimeError):
+                    record['risk_error'] = 'fee_budget_unavailable'
+                    self.execution_fault = 'fee_budget_unavailable'
+                    self._flush_executions()
+                    if not self.emergency_mode: raise ExecutionUnknown() from None
+                    self._upsert_trade(trade)
+                    continue
                 sm = 1 if pos['side'] == 'buy' else -1
                 if sm * (levels['sl'] - pos['sl']) > 0:
                     pos['sl'] = levels['sl']
                     pos['risk_capped'] = True
                 symbol = record['symbol']
-                if symbol in self.pending_protection:
-                    self.pending_protection[symbol]['entry_fee'] = float(fee)
-                    self.pending_protection[symbol]['accounting_status'] = 'complete'
-                    self.pending_protection[symbol]['sl'] = pos['sl']
+                active = self.pending_protection.get(symbol)
+                if active and active.get('signal_id') == pos['signal_id']:
+                    active['entry_fee'] = float(fee)
+                    active['accounting_status'] = 'complete'
+                    if sm * (pos['sl'] - active['sl']) > 0: active['sl'] = pos['sl']
             self._flush_executions()
             self._upsert_trade(trade)
 
-    async def _accept_fill(self, symbol, order, options, side, recovered=False):
+    async def _accept_fill(self, symbol, order, options, side, recovered=False, facts_only=False):
         record = self._remember_order(symbol, order, options, side)
+        order = record['order']
         actual, filled = float(order.get('avgPrice', 0)), float(order.get('executedQty', 0))
         if actual <= 0 or filled <= 0: raise ExecutionUnknown()
         reducing = bool(options.get('reduceOnly'))
@@ -129,11 +143,27 @@ class DurableExecution:
             'reduceOnly': reducing, 'fee_usdt': 0., 'pnl_usdt': 0., 'accounting_status': 'pending',
             'balance_usdt': self.balance, 'mode': self.mode, 'recovered': recovered,
             'protection_status': 'unconfirmed' if not reducing else 'closed',
-            'emergency': bool(self.execution_fault), 'signal_id': options.get('signal_id')}
+            'emergency': bool(self.execution_fault), 'signal_id': options.get('signal_id') if reducing else order['clientOrderId']}
         # A later cumulative fill invalidates provisional/previous accounting.
         if trade['amount'] != filled:
             trade.update(amount=filled, price=actual, fee_usdt=0., pnl_usdt=0., accounting_status='pending')
+        if not reducing:
+            leverage = options.get('leverage')
+            record['entry_facts'] = {
+                'signal_id': trade['signal_id'], 'side': side, 'entry': actual, 'amount': filled,
+                'leverage': leverage, 'margin': actual * filled / leverage if leverage else None,
+                'opened_at': datetime.fromisoformat(stamp).timestamp(), 'entry_fee': trade['fee_usdt'],
+                'accounting_status': trade['accounting_status'], 'entry_order_id': str(order['orderId']),
+                'atr_at_entry': options.get('exit_atr'), 'atr_source': options.get('atr_source', 'unknown')}
+            trade.update(entry_time=stamp, leverage=leverage, margin=record['entry_facts']['margin'])
+        # The fill is a fact even if building risk levels fails next.
+        record['trade'] = trade
+        self._flush_executions()
+        self._upsert_trade(trade)
         pos = record.get('position')
+        if facts_only and not reducing:
+            await self.sync_accounting()
+            return dict(record['trade'])
         if not reducing:
             if recovered and any(k not in options for k in ('leverage', 'risk_cfg', 'exit_atr')):
                 raise ExecutionUnknown()  # Legacy history needs explicit recovery; never invent ATR/leverage.
@@ -142,14 +172,23 @@ class DurableExecution:
             if symbol in self.brackets:
                 bracket = bracket_for(self.brackets[symbol], actual * filled)
                 risk_cfg['tp_sl'].update(mmr=float(bracket['maintMarginRatio']), maintenance_amount=float(bracket.get('cum', 0)), quantity=filled)
+                if leverage > int(bracket['initialLeverage']):
+                    record['risk_error'] = 'fill_exceeds_leverage_bracket'
+                    self._flush_executions()
+                    raise ExecutionUnknown()
             if pos is None or pos['amount'] != filled:
                 previous_pos = pos
-                pos = make_position(side, actual, filled, leverage,
+                try:
+                    pos = make_position(side, actual, filled, leverage,
                     options.get('exit_atr', actual * self.cfg['atr']['fallback_atr_pct']), risk_cfg,
                     options.get('equity', self.equity), self.fee_rate,
-                    opened_at=datetime.fromisoformat(stamp).timestamp(),
+                    opened_at=previous_pos['opened_at'] if previous_pos else datetime.fromisoformat(trade['timestamp']).timestamp(),
                     signal_id=pos.get('signal_id') if pos else order['clientOrderId'],
                     atr_source=options.get('atr_source', 'fallback'))
+                except (ValueError, RuntimeError):
+                    record['risk_error'] = 'risk_levels_unavailable'
+                    self._flush_executions()
+                    raise ExecutionUnknown() from None
                 if previous_pos:
                     pos['protection'] = copy.deepcopy(previous_pos.get('protection', {}))
                     sm = 1 if side == 'buy' else -1
@@ -161,14 +200,25 @@ class DurableExecution:
                     expected_entry=expected, actual_entry=actual,
                     entry_slippage_bps=entry_slippage_bps(expected, actual, side),
                     mmr=risk_cfg['tp_sl']['mmr'], maintenance_amount=risk_cfg['tp_sl'].get('maintenance_amount', 0))
+            if trade['accounting_status'] == 'complete': pos['entry_fee'] = trade['fee_usdt']
             trade.update(leverage=pos['leverage'], margin=pos['margin'], signal_id=pos['signal_id'],
                 planned_sl=pos['stop_initial'], planned_tp=pos['tp'], entry_time=stamp,
                 expected_entry=expected, actual_entry=actual, entry_slippage_bps=pos['entry_slippage_bps'])
             record['position'] = pos
             self.pending_protection[symbol] = pos
         else:
-            opening = next((r.get('position') for r in reversed(list(self.executions.values()))
-                            if r['symbol'] == symbol and r.get('position')), None)
+            opening = None
+            for prior in reversed(list(self.executions.values())):
+                if prior['symbol'] != symbol: continue
+                candidate = prior.get('position') or prior.get('entry_facts')
+                if not candidate: continue
+                sid = candidate['signal_id']
+                if options.get('signal_id') and options['signal_id'] != sid: continue
+                closed = sum(t['amount'] for t in self.trades if t.get('reduceOnly') and t.get('signal_id') == sid and str(t['id']) != str(order['orderId']))
+                if closed >= candidate['amount']: continue
+                opening = candidate
+                trade['signal_id'] = sid
+                break
             trade.update(exit_time=stamp, expected_exit=expected, actual_exit=actual,
                 exit_reason=options.get('exit_reason', trade.get('exit_reason', 'recovered_close')),
                 exit_position=copy.deepcopy(options.get('exit_position') or opening),
@@ -176,7 +226,7 @@ class DurableExecution:
             if opening:
                 trade.update(leverage=opening['leverage'], margin=opening['margin'],
                     entry_order_id=opening['entry_order_id'], entry_time=datetime.fromtimestamp(opening['opened_at'], timezone.utc).isoformat(),
-                    planned_sl=opening['stop_initial'], planned_tp=opening['tp'],
+                    planned_sl=opening.get('stop_initial'), planned_tp=opening.get('tp'),
                     actual_protection=copy.deepcopy(opening.get('protection', {})))
         record['trade'] = trade
         # Commit execution truth before any userTrades request or protection HTTP.
@@ -212,7 +262,14 @@ class DurableExecution:
             if options.get('brackets'): self.brackets[intent['symbol']] = options['brackets']
             record = self.executions.get(self.execution_key(intent['symbol'], intent.get('order_id')))
             if record and record.get('order', {}).get('status') in TERMINAL and (record.get('trade') or float(record['order'].get('executedQty', 0)) == 0):
-                if record.get('trade'): self._upsert_trade(record['trade'])
+                if record.get('trade'):
+                    self._upsert_trade(record['trade'])
+                    if not record['trade']['reduceOnly'] and not record.get('position'):
+                        live = any(float(p['positionAmt']) != 0 for p in await self.get_position(intent['symbol']))
+                        if record.get('risk_error'):
+                            unresolved |= live
+                        elif live and not self.emergency_mode:
+                            await self._accept_fill(intent['symbol'], record['order'], options, intent['side'], recovered=True)
                 continue
             order = await self.query_order_by_client_id(intent['symbol'], client_id)
             if not order:
@@ -221,7 +278,7 @@ class DurableExecution:
             self.resolve_intent(client_id, order)
             self._remember_order(intent['symbol'], order, options, intent['side'])
             if float(order.get('executedQty', 0)) > 0:
-                await self._accept_fill(intent['symbol'], order, options, intent['side'], recovered=True)
+                await self._accept_fill(intent['symbol'], order, options, intent['side'], recovered=True, facts_only=self.emergency_mode)
             if order.get('status') not in TERMINAL: unresolved = True
         await self.sync_accounting()
         return not unresolved
@@ -242,16 +299,21 @@ class DurableExecution:
             self.resolve_intent(client_id, order)
             self._remember_order(symbol, order, intent.get('params', {}), intent['side'])
             if float(order.get('executedQty', 0)) > 0:
-                await self._accept_fill(symbol, order, intent.get('params', {}), intent['side'], recovered=True)
+                await self._accept_fill(symbol, order, intent.get('params', {}), intent['side'], recovered=True, facts_only=True)
 
     async def create_order(self, symbol, type, side, amount, params=None):
+        previous_ids = set(self.intents)
         try:
             return await self._create_order(symbol, type, side, amount, params)
         except Exception as error:
             self.execution_fault = 'order_execution_uncertain'
-            for record in self.executions.values():
-                if record['symbol'] == symbol and record.get('trade') and not record['trade']['reduceOnly']:
-                    record['trade']['emergency'] = True
+            current_ids = set(self.intents) - previous_ids
+            affected = next((r for r in reversed(list(self.executions.values())) if r['symbol'] == symbol
+                             and r.get('trade') and r['order'].get('clientOrderId') in current_ids), None)
+            if affected:
+                affected['trade']['emergency'] = True
+                if not affected['trade']['reduceOnly']: affected['trade']['protection_status'] = 'failed'
+                self._upsert_trade(affected['trade'])
             latest = next((i for i in reversed(list(self.intents.values())) if i['symbol'] == symbol), {})
             self.journal.log('order_execution_failed', symbol=symbol, stage='execution',
                 order_id=latest.get('order_id'), client_order_id=latest.get('params', {}).get('newClientOrderId'),
@@ -261,8 +323,11 @@ class DurableExecution:
 
     async def _create_order(self, symbol, type, side, amount, params=None):
         options = copy.deepcopy(params or {})
+        if options.get('reduceOnly'):
+            await self.settle_before_close(symbol)
         # Resolve previous same-symbol ambiguity before considering another send.
         for client_id, intent in list(self.intents.items()):
+            if options.get('reduceOnly'): break
             if intent['symbol'] != symbol or intent['type'] != 'market' or intent['status'] == 'rejected': continue
             record = self.executions.get(self.execution_key(intent['symbol'], intent.get('order_id')))
             if not record or record['order'].get('status') not in TERMINAL or not record.get('trade'):
@@ -271,7 +336,7 @@ class DurableExecution:
                 if not record or record['order'].get('status') not in TERMINAL:
                     raise ExecutionUnknown()
         if not options.get('reduceOnly'):
-            if self.execution_fault: raise ExecutionUnknown()
+            if self.execution_fault or self.storage_fault or self.journal.failed: raise ExecutionUnknown()
             # Runtime selected/confirmed with current equity before computing size.
             if any(float(p['positionAmt']) != 0 for p in await self.get_position(symbol)):
                 raise ExecutionUnknown()
