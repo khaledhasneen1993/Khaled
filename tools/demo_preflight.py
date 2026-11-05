@@ -10,6 +10,7 @@ from exchange.demo import validate_demo
 from exchange.live_exchange import LiveExchange
 from infra.rate_limit import TokenBucket
 from infra.errors import diagnostic_fields
+from exchange.orders import TERMINAL_ORDER_STATUSES
 
 
 class ReadOnlyDemo(LiveExchange):
@@ -57,6 +58,9 @@ async def preflight(exchange, symbol, websocket=True):
     storage_failed = operations.get('storage_failed', False)
     pending_accounting = sum(r.get('trade', {}).get('accounting_status') == 'pending' for r in exchange.executions.values())
     pending_prices = sum(bool(r.get('fill_price_pending')) for r in exchange.executions.values())
+    pending_native = sum(bool(r.get('native_exit')) and (r['order'].get('status') not in TERMINAL_ORDER_STATUSES
+        or bool(r.get('fill_price_pending')) or float(r['order'].get('executedQty', 0)) > 0 and not r.get('trade'))
+        for r in exchange.executions.values())
     unresolved = []
     for client_id, intent in exchange.intents.items():
         if intent['status'] == 'rejected': continue
@@ -75,7 +79,8 @@ async def preflight(exchange, symbol, websocket=True):
         'apiRestrictions': 'not used; Demo 404 cannot establish permissions',
         'local_pending_intents': sum(i['status'] == 'pending' for i in exchange.intents.values()),
         'pending_execution_prices': pending_prices,
-        'requires_operator_review': bool(exchange.positions or orders or kill or guard.get('active') or storage_failed or unresolved or pending_accounting or pending_prices
+        'pending_native_exits': pending_native,
+        'requires_operator_review': bool(exchange.positions or orders or kill or guard.get('active') or storage_failed or unresolved or pending_accounting or pending_prices or pending_native
                                          or not choice.get('entry_order_valid', False) or can_trade is not True or websocket and not ws_ok)}
 
 

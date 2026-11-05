@@ -290,6 +290,8 @@ class DynamicPaperHunter(dynamic.CascadeHunter, PaperState):
                     return
             raise
         if symbol in self.positions:
+            if self.execution_mode != 'paper':
+                await self.exchange.retire_protection(symbol, self.positions[symbol])
             self.record_exit_reason(symbol, reason, price)
             self.positions.pop(symbol, None)
         if self.execution_mode != "paper":
@@ -319,6 +321,42 @@ class DynamicPaperHunter(dynamic.CascadeHunter, PaperState):
         while self._notifications:
             await self.safety.closed(self._notifications.pop(0))
 
+    async def reconcile_native_exit(self, symbol):
+        """Native child execution precedes any replacement or fallback close."""
+        from exchange.protection_state import ProtectionGuardError
+        pos = self.positions.get(symbol)
+        if not pos: return False
+        events = await self.exchange.inspect_native_exits(symbol, pos, strict=True)
+        if not events: return False
+        await self.exchange.refresh_account()
+        if symbol not in self.exchange.positions:
+            if await self.adopt_native_close(symbol): return True
+            raise ProtectionGuardError('native_exit_unresolved', {'symbol': symbol})
+        if any(e.get('missing') for e in events):
+            raise ProtectionGuardError('native_protection_missing', {'symbol': symbol})
+        filled = [e for e in events if e['filled'] > 0]
+        if not filled: raise ProtectionGuardError('native_exit_unfilled', {'symbol': symbol})
+        # Terminal partial native exits may leave a proven remainder. The close
+        # path refreshes it again and rechecks child settlement before its POST.
+        event = filled[-1]
+        await self.close_position(symbol, event['reason'], event['trigger'])
+        return True
+
+    async def exit_reference(self, symbol):
+        if self.execution_mode != 'paper' and self.cfg['exchange']['working_type'] == 'MARK_PRICE':
+            from exchange.fill_price import positive_decimal
+            from exchange.protection_state import ProtectionGuardError
+            self.exchange.execution_stage = 'exit_price_snapshot'
+            rows = [r for r in await self.exchange.get_position(symbol) if float(r['positionAmt']) != 0]
+            if not rows:
+                await self.adopt_native_close(symbol)
+                return None
+            price = positive_decimal(rows[0].get('markPrice'))
+            if price is None: raise ProtectionGuardError('invalid_mark_price', {'symbol': symbol})
+            self.exchange.prices[symbol] = float(price)
+            return float(price)
+        return (await self.exchange.fetch_ticker(symbol))['last']
+
     async def adopt_native_close(self, symbol):
         if self.execution_mode == 'paper': return False
         pos = self.positions[symbol]
@@ -334,22 +372,10 @@ class DynamicPaperHunter(dynamic.CascadeHunter, PaperState):
             return not math.isclose(quantity, original_quantity, rel_tol=self.cfg['exchange']['fill_qty_tolerance_pct'])
         reason = closes[-1].get('exit_reason', 'recovered_close') if closes else 'recovered_close'
         if incomplete():
-            for name, protection in pos.get('protection', {}).items():
-                data = await self.exchange.query_order_by_client_id(symbol, protection['clientOrderId'])
-                actual_id = str((data or {}).get('actualOrderId') or '')
-                if not actual_id.isdigit() or int(actual_id) <= 0: continue
-                if any(str(t['id']) == actual_id for t in closes): continue
-                order = await self.exchange._request('GET', '/fapi/v1/order', {
-                    'symbol': self.exchange.raw(symbol), 'orderId': actual_id}, retry=True)
-                order = await self.exchange.settle_fill(symbol, order)
-                if order.get('side') != ('SELL' if pos['side'] == 'buy' else 'BUY'): continue
-                if float(order.get('executedQty', 0)) <= 0: continue
-                await self.exchange._accept_fill(symbol, order, {'reduceOnly': True,
-                    'signal_id': pos['signal_id'], 'expected_price': float(protection['trigger'])},
-                    order['side'].lower(), recovered=True)
-                reason = 'SL' if name == 'sl' else 'TP'
-                closes = [t for t in self.exchange.trades if t.get('reduceOnly') and t.get('signal_id') == pos['signal_id']]
-                if not incomplete(): break
+            events = await self.exchange.inspect_native_exits(symbol, pos, strict=False)
+            filled = [e for e in events if e['filled'] > 0]
+            if filled: reason = filled[-1]['reason']
+            closes = [t for t in self.exchange.trades if t.get('reduceOnly') and t.get('signal_id') == pos['signal_id']]
         if incomplete():
             # A remote reducing execution may be absent from both local intents
             # and native protection metadata. Discover it without sending orders.
@@ -375,16 +401,20 @@ class DynamicPaperHunter(dynamic.CascadeHunter, PaperState):
                     'signal_id': pos['signal_id'], 'exit_position': dict(pos)}, order['side'].lower(), recovered=True)
             closes = [t for t in self.exchange.trades if t.get('reduceOnly') and t.get('signal_id') == pos['signal_id']]
         if not closes: return False
+        await self.exchange.refresh_account()
+        if symbol in self.exchange.positions: return False
         quantity = sum(t['amount'] for t in self.exchange.trades if t.get('reduceOnly')
                        and t.get('signal_id') == pos['signal_id'])
         if not math.isclose(quantity, original_quantity, rel_tol=self.cfg['exchange']['fill_qty_tolerance_pct']):
             return False
+        await self.exchange.retire_protection(symbol, pos)
         self.record_exit_reason(symbol, reason, closes[-1]['price'])
         self.persist_execution_metadata()
         self.positions.pop(symbol)
         self.exchange.clear_active_protection(symbol, pos['signal_id'])
         for remaining in await self.exchange.get_open_orders(symbol):
             if remaining.get('is_algo'): await self.exchange.cancel_algo(remaining)
+            else: await self.exchange.cancel_order(symbol, order_id=remaining['orderId'])
         await self._drain_notifications()
         self.save()
         return True

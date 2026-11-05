@@ -172,8 +172,12 @@ class CascadeHunter:
         to_remove = []
         for symbol, pos in list(self.positions.items()):
             try:
-                ticker = await self.exchange.fetch_ticker(symbol)
-                price = ticker["last"]
+                if getattr(self, 'execution_mode', 'paper') != 'paper' and hasattr(self, 'exit_reference'):
+                    price = await self.exit_reference(symbol)
+                    if price is None: continue
+                else:
+                    ticker = await self.exchange.fetch_ticker(symbol)
+                    price = ticker["last"]
                 from paper_account import Position, make_position
                 cfg = getattr(self, "cfg", None) or load_config()
                 atr, source = await self.exit_atr(symbol, price)

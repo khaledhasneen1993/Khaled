@@ -3,6 +3,8 @@ import asyncio
 import uuid
 from .quantity import OrderValidationError
 
+TERMINAL_ORDER_STATUSES = {'FILLED', 'EXPIRED', 'CANCELED', 'REJECTED', 'EXPIRED_IN_MATCH'}
+
 
 class ExchangeError(RuntimeError):
     def __init__(self, status=0, code=0, retry_after=0):

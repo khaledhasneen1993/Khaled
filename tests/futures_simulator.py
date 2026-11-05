@@ -28,6 +28,7 @@ class FuturesSimulator:
             'SOLUSDT': ('120', '.01', '.01', 75, 10000, '.0065'),
         }
         self.prices = {s: D(v[0]) for s, v in self.specs.items()}
+        self.mark_prices = {}
         self.leverage, self.margin_type, self.positions = {}, {}, {}
         self.orders, self.algos, self.fills, self.requests = {}, {}, [], []
         self.fee = D('.0005')
@@ -48,6 +49,7 @@ class FuturesSimulator:
         for s, pos in self.positions.items():
             if symbol and s != symbol: continue
             qty, entry = pos['qty'], pos['entry']
+            mark = self.mark_prices.get(s, self.prices[s])
             if not qty: continue
             sign = 1 if qty > 0 else -1
             size = abs(qty)
@@ -56,8 +58,8 @@ class FuturesSimulator:
             isolated = entry * size / self.leverage[s] - entry * size * self.fee
             liq = (entry * size - sign * (isolated + D(tier['cum']))) / (size * (1 - sign * D(tier['maintMarginRatio'])))
             rows.append(dict(symbol=s, positionAmt=str(qty), entryPrice=str(entry),
-                markPrice=str(self.prices[s]), liquidationPrice=str(liq),
-                positionInitialMargin=str(self.prices[s] * size / self.leverage[s])))
+                markPrice=str(mark), liquidationPrice=str(liq),
+                positionInitialMargin=str(mark * size / self.leverage[s])))
         return rows
 
     def fill(self, p):
@@ -91,6 +93,33 @@ class FuturesSimulator:
             realizedPnl=str(pnl), time=stamp))
         return order
 
+    def trigger_algo(self, algo_id, partial=False):
+        algo = self.algos[algo_id]
+        self.partial_close = partial
+        order = self.fill(dict(symbol=algo['symbol'], side=algo['side'], quantity=algo['quantity'],
+            newClientOrderId=algo['clientAlgoId'], reduceOnly='true'))
+        if partial:
+            order.update(status='PARTIALLY_FILLED', origQty=algo['quantity'])
+        algo.update(algoStatus='FINISHED', actualOrderId=str(order['orderId']))
+        return order
+
+    def complete_native_order(self, order_id):
+        order = self.orders[order_id]
+        symbol, price = order['symbol'], self.prices[order['symbol']]
+        pos = self.positions[symbol]
+        amount = min(D(order['origQty']) - D(order['executedQty']), abs(pos['qty']))
+        sign = 1 if pos['qty'] > 0 else -1
+        pnl, fee = (price - pos['entry']) * amount * sign, price * amount * self.fee
+        quote = D(order['avgPrice']) * D(order['executedQty']) + price * amount
+        total = D(order['executedQty']) + amount
+        self.wallet += pnl - fee
+        pos['qty'] -= sign * amount
+        order.update(status='FILLED', executedQty=str(total), avgPrice=str(quote / total),
+                     cumQuote=str(quote), updateTime=int(time.time() * 1000))
+        self.fills.append(dict(id=len(self.fills) + 10000, orderId=order_id, symbol=symbol,
+            qty=str(amount), price=str(price), commission=str(fee), commissionAsset='USDT',
+            realizedPnl=str(pnl), time=order['updateTime']))
+
     async def __call__(self, request):
         p, method, path = request.url.params, request.method, request.url.path
         # Record contract facts without ever storing a signed URL or credentials.
@@ -119,7 +148,7 @@ class FuturesSimulator:
         elif path.endswith('/account'):
             rows = self.position_rows()
             used = sum((D(r['positionInitialMargin']) for r in rows), D(0))
-            unrealized = sum(((self.prices[s] - v['entry']) * v['qty'] for s, v in self.positions.items()), D(0))
+            unrealized = sum(((self.mark_prices.get(s, self.prices[s]) - v['entry']) * v['qty'] for s, v in self.positions.items()), D(0))
             data = {'assets': [dict(asset='USDT', walletBalance=str(self.wallet),
                 marginBalance=str(self.wallet + unrealized), availableBalance=str(self.wallet + unrealized - used), initialMargin=str(used))]}
         elif path.endswith('/klines'):
@@ -137,6 +166,10 @@ class FuturesSimulator:
                     if data['reduceOnly']: self.lose_close_response = False
                     else: self.lose_entry_response = False
                     raise httpx.ReadTimeout('simulated lost POST response', request=request)
+            elif method == 'DELETE':
+                data = self.orders.get(int(p['orderId']))
+                if data and data['status'] not in ('FILLED', 'CANCELED', 'EXPIRED', 'REJECTED'):
+                    data['status'] = 'CANCELED'
             else:
                 data = self.orders.get(int(p['orderId'])) if 'orderId' in p else next(
                     (o for o in self.orders.values() if o['clientOrderId'] == p['origClientOrderId']), None)
@@ -156,7 +189,7 @@ class FuturesSimulator:
                 aid = len(self.algos) + 2000
                 data = dict(algoId=aid, clientAlgoId=p['clientAlgoId'], symbol=s, algoStatus='NEW',
                     side=p['side'], orderType=p['type'], quantity=p['quantity'],
-                    reduceOnly=True, triggerPrice=p['triggerPrice'], actualOrderId='')
+                    reduceOnly=True, triggerPrice=p['triggerPrice'], actualOrderId='', workingType=p['workingType'])
                 self.algos[aid] = data
             elif method == 'GET': data = next((o for o in self.algos.values() if o['clientAlgoId'] == p['clientAlgoId']), None)
             else:

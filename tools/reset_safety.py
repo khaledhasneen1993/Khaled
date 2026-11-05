@@ -28,6 +28,9 @@ def reviewed_reset_state(data, root, cfg):
             raise ValueError('Unresolved order intent remains; restore it before reset')
     if any(r.get('fill_price_pending') or r.get('trade', {}).get('accounting_status') == 'pending' for r in executions.values()):
         raise ValueError('Pending accounting or execution price remains; restore exact executions before reset')
+    if any(r.get('native_exit') and (r['order'].get('status') not in terminal
+            or float(r['order'].get('executedQty', 0)) > 0 and not r.get('trade')) for r in executions.values()):
+        raise ValueError('Unresolved native exit remains; reconcile before reset')
     kill = KillSwitch(cfg['kill_switch'])
     kill.restore(data['operations']['kill'])
     kill.roll_day(data.get('equity_usdt'))

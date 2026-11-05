@@ -1,6 +1,7 @@
 """Safety orchestration around existing signal and exit calculations."""
 import asyncio
 import json
+import math
 import time
 from collections import deque
 from datetime import datetime, timezone, timedelta
@@ -14,6 +15,7 @@ from risk.kill_switch import KillSwitch
 from risk.exposure_limits import can_open
 from risk.funding import check_funding_before_settlement
 from risk.slippage import check_slippage_health
+from exchange.protection_state import ProtectionGuardError, price_exit_reason
 
 
 class SafetySupervisor:
@@ -202,11 +204,27 @@ class SafetySupervisor:
                 return False
             await self.bot.exchange.refresh_account()
             self.bot.merge_execution_state()
-            for symbol in set(self.bot.positions) - set(self.bot.exchange.positions):
-                await self.bot.adopt_native_close(symbol)
+            local, remote = self.bot.positions, self.bot.exchange.positions
+            bad_identity = [s for s in set(local) & set(remote) if local[s]['side'] != remote[s]['side']
+                or not math.isclose(local[s]['entry'], remote[s]['entry'], rel_tol=self.cfg['recon']['entry_tolerance_pct'])]
+            if bad_identity:
+                await self.event('reconcile_mismatch', 'critical', report={'position_identity': sorted(bad_identity)})
+                await self.trip('reconcile_mismatch')
+                return False
+            try:
+                for symbol in set(self.bot.positions) - set(self.bot.exchange.positions):
+                    await self.bot.adopt_native_close(symbol)
+                for symbol in list(self.bot.positions):
+                    await self.bot.reconcile_native_exit(symbol)
+            except Exception as error:
+                await self.event('protection_recovery_exception', 'critical',
+                    stage=getattr(self.bot.exchange, 'execution_stage', 'native_exit_resolution'),
+                    report=error.details if isinstance(error, ProtectionGuardError) else None,
+                    recovery_action='latch_and_close_remaining', **diagnostic_fields(error))
+                await self.trip('protection_recovery_failed')
+                return False
             # Check identity and size before replacing any native protection.
             local, remote = self.bot.positions, self.bot.exchange.positions
-            import math
             mismatch = set(local) != set(remote) or any(
                 local[s]['side'] != remote[s]['side']
                 or not math.isclose(local[s]['amount'], remote[s]['amount'], rel_tol=self.cfg['exchange']['fill_qty_tolerance_pct'])
@@ -219,11 +237,19 @@ class SafetySupervisor:
             try:
                 for symbol, pos in list(self.bot.positions.items()):
                     if symbol in self.bot.exchange.positions:
-                        self.bot.exchange.constrain_actual_liquidation(symbol, pos, self.bot.exchange.positions[symbol]['remote'])
+                        actual = self.bot.exchange.positions[symbol]['remote']
+                        self.bot.exchange.execution_stage = 'protection_price_snapshot'
+                        ticker = await self.bot.exchange.fetch_ticker(symbol)
+                        self.bot.exchange.constrain_actual_liquidation(symbol, pos, {**actual, '_trigger_price': ticker['last']})
+                        price = float(actual['markPrice']) if self.cfg['exchange']['working_type'] == 'MARK_PRICE' else ticker['last']
+                        if reason := price_exit_reason(pos, price):
+                            await self.bot.close_position(symbol, reason, price)
+                            continue
                         await self.bot.exchange.protect(symbol, pos)
             except Exception as error:
                 await self.event('protection_recovery_exception', 'critical',
                     stage=getattr(self.bot.exchange, 'execution_stage', 'protection_recovery'),
+                    report=error.details if isinstance(error, ProtectionGuardError) else None,
                     recovery_action='latch_and_close_remaining', **diagnostic_fields(error))
                 await self.trip('protection_recovery_failed')
                 return False

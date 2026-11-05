@@ -27,10 +27,11 @@ from infra.rate_limit import TokenBucket, with_backoff
 from risk.slippage import entry_slippage_bps, exit_slippage_bps
 from .orders import ExchangeError, ExecutionUnknown, safe_create_order
 from .execution import DurableExecution
+from .protection_state import NativeExitState, ProtectionGuardError
 from .quantity import quantity_rules, validate_quantity, OrderValidationError
 
 
-class LiveExchange(DurableExecution, PaperExchange):
+class LiveExchange(DurableExecution, NativeExitState, PaperExchange):
     def __init__(self, cfg: dict, rate_limiter):
         self.cfg = cfg
         self.mode = cfg['exchange']['mode']
@@ -153,7 +154,7 @@ class LiveExchange(DurableExecution, PaperExchange):
         keys = ('orderId', 'clientOrderId', 'algoId', 'clientAlgoId', 'symbol', 'side',
                 'status', 'algoStatus', 'type', 'orderType', 'origQty', 'executedQty',
                 'cumQuote', 'avgPrice', 'reduceOnly', 'quantity', 'triggerPrice',
-                'actualOrderId', 'time', 'updateTime', 'createTime')
+                'actualOrderId', 'workingType', 'time', 'updateTime', 'createTime')
         def snapshot(value): return {k: value[k] for k in keys if k in value}
         observations = intent.setdefault('observations', [])
         if not observations and intent.get('response'):
@@ -524,19 +525,40 @@ class LiveExchange(DurableExecution, PaperExchange):
 
     def constrain_actual_liquidation(self, symbol, pos, actual):
         """Tighten to Binance's actual boundary; never expand a loss budget."""
-        liquidation = Decimal(str(actual.get('liquidationPrice', 0)))
-        if not liquidation.is_finite() or liquidation <= 0: raise ExecutionUnknown()
+        self.execution_stage = 'liquidation_validation'
+        from .fill_price import positive_decimal
+        def fail(reason, **values):
+            details = {'symbol': symbol, 'working_type': self.cfg['exchange']['working_type'],
+                'stop_price': pos['sl'], 'leverage': pos['leverage'], **values}
+            # Only selected numeric facts and fixed enums, never exception text.
+            for record in self.executions.values():
+                if record.get('position', {}).get('signal_id') == pos['signal_id']:
+                    record.setdefault('guard_failures', []).append({'timestamp': datetime.now(timezone.utc).isoformat(),
+                        'reason': reason, **details})
+            self._flush_executions()
+            self.journal.log('liquidation_guard_failed', symbol=symbol, stage=self.execution_stage,
+                reason=reason, report=details, recovery_action='latch_and_close_remaining')
+            raise ProtectionGuardError(reason, details)
+        liquidation = positive_decimal(actual.get('liquidationPrice'))
+        if liquidation is None: fail('invalid_liquidation_price')
         sm = 1 if pos['side'] == 'buy' else -1
         buffer = Decimal(str(self.cfg['tp_sl']['liq_safety_margin']))
         boundary = liquidation * (1 + sm * buffer)
+        if positive_decimal(boundary) is None: fail('invalid_liquidation_price')
+        mark = positive_decimal(actual.get('markPrice'))
+        trigger = mark if self.cfg['exchange']['working_type'] == 'MARK_PRICE' else positive_decimal(actual.get('_trigger_price'))
+        facts = dict(liquidation_price=float(liquidation), buffered_liquidation=float(boundary),
+                     mark_price=float(mark) if mark is not None else None,
+                     trigger_price=float(trigger) if trigger is not None else None)
+        if mark is None: fail('invalid_mark_price', **facts)
+        if sm * (mark - boundary) <= 0: fail('mark_liquidation_buffer_breach', **facts)
         tick = Decimal(self.market(symbol)['tick'])
         stop = Decimal(self._price(symbol, pos['sl'], sm == 1))
         if sm * (stop - boundary) <= 0:
             rounding = ROUND_FLOOR if sm == 1 else ROUND_CEILING
             stop = ((boundary / tick).to_integral_value(rounding=rounding) + sm) * tick
-        reference = Decimal(str(actual.get('markPrice') or self.prices.get(symbol, pos['entry'])))
-        if not reference.is_finite() or reference <= 0 or sm * (reference - stop) <= 0:
-            raise ExecutionUnknown()
+            if trigger is None: fail('trigger_price_unavailable', **facts)
+            if sm * (trigger - stop) <= 0: fail('no_valid_stop_before_trigger', candidate_stop=float(stop), **facts)
         if sm * (stop - Decimal(str(pos['sl']))) > 0:
             pos['sl'] = float(stop)
             pos['risk_capped'] = True

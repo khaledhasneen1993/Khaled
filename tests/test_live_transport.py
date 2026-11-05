@@ -210,7 +210,7 @@ class SimulatedBinance:
         self.qty += qty if side == 'BUY' else -qty
         order_id = len(self.orders) + 1
         order = {'orderId': order_id, 'clientOrderId': client_id, 'status': status,
-                 'side': side, 'avgPrice': str(self.price), 'executedQty': str(qty)}
+                 'side': side, 'avgPrice': str(self.price), 'executedQty': str(qty), 'reduceOnly': reducing}
         self.orders[order_id] = (order, fee, pnl)
         return order
 
@@ -226,7 +226,7 @@ class SimulatedBinance:
             data = [[i * 60000, '100', '100', '100', '100', '1'] for i in range(int(p['limit']))]
         elif path == '/fapi/v3/positionRisk':
             data = [{'symbol': 'BTCUSDT', 'positionAmt': str(self.qty), 'entryPrice': '100',
-                     'liquidationPrice': '98.4', 'positionInitialMargin': '10'}] if self.qty else []
+                     'markPrice': str(self.price), 'liquidationPrice': '98.4', 'positionInitialMargin': '10'}] if self.qty else []
         elif path == '/fapi/v3/account':
             data = {'assets': [{'asset': 'USDT', 'walletBalance': str(self.wallet),
                 'marginBalance': str(self.wallet + (self.price - 100) * self.qty),

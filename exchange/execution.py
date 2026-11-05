@@ -16,8 +16,9 @@ from .orders import ExchangeError, ExecutionUnknown, FillPriceUnavailable, Order
 from .fill_price import execution_price, positive_decimal
 from .quantity import validate_quantity, OrderValidationError
 from .leverage import bracket_for
+from .orders import TERMINAL_ORDER_STATUSES as TERMINAL
+from .protection_state import price_exit_reason, ProtectionGuardError
 
-TERMINAL = {'FILLED', 'EXPIRED', 'CANCELED', 'REJECTED', 'EXPIRED_IN_MATCH'}
 
 
 class DurableExecution:
@@ -49,8 +50,16 @@ class DurableExecution:
             return previous
         if previous.get('order', {}).get('status') in TERMINAL and order.get('status') not in TERMINAL:
             return previous
+        options = copy.deepcopy(options)
+        if previous.get('native_exit'):
+            # Generic history discovery must not erase a native child's origin,
+            # SL/TP reason or snapshot while its price/accounting is pending.
+            for field in ('native_parent_id', 'native_parent_client_id', 'signal_id',
+                          'exit_reason', 'expected_price', 'exit_position'):
+                if field in previous.get('options', {}):
+                    options[field] = copy.deepcopy(previous['options'][field])
         record = {**previous, 'symbol': symbol, 'order': order,
-                  'options': copy.deepcopy(options), 'side': side}
+                  'options': options, 'side': side}
         self.executions[key] = record
         self._flush_executions()
         return record
@@ -73,7 +82,7 @@ class DurableExecution:
             if str(order.get('orderId')) != order_id or client_id and order.get('clientOrderId') != client_id:
                 raise ExecutionUnknown()
             client = order.get('clientOrderId')
-            if client in self.intents: self.resolve_intent(client, order)
+            if client in self.intents and self.intents[client]['type'] == 'market': self.resolve_intent(client, order)
             record = self.executions.get(self.execution_key(symbol, order_id))
             if record: order = self._remember_order(symbol, order, record['options'], record['side'])['order']
         if positive_decimal(order.get('executedQty')) is not None and self.known_execution_price(symbol, order)[0] is None:
@@ -206,6 +215,7 @@ class DurableExecution:
         self.execution_stage = 'fill_persistence'
         record = self._remember_order(symbol, order, options, side)
         order = record['order']
+        options = record['options']
         price, source = self.known_execution_price(symbol, order)
         quantity = positive_decimal(order.get('executedQty'))
         if quantity is None: raise ExecutionUnknown()
@@ -334,7 +344,13 @@ class DurableExecution:
                     await asyncio.sleep(self.cfg['exchange']['order_poll_sec'])
             if remote:
                 self.execution_stage = 'liquidation_validation'
-                self.constrain_actual_liquidation(symbol, pos, remote[0])
+                ticker = await self.fetch_ticker(symbol)
+                actual_risk = {**remote[0], '_trigger_price': ticker['last']}
+                self.constrain_actual_liquidation(symbol, pos, actual_risk)
+                trigger_price = float(remote[0]['markPrice']) if self.cfg['exchange']['working_type'] == 'MARK_PRICE' else ticker['last']
+                if price_exit_reason(pos, trigger_price):
+                    self.execution_stage = 'initial_exit_level_reached'
+                    raise ProtectionGuardError('initial_exit_level_reached', {'symbol': symbol, 'trigger_price': trigger_price})
                 self._flush_executions()
                 await self.protect(symbol, pos)
                 trade['actual_protection'] = copy.deepcopy(pos['protection'])
@@ -381,12 +397,15 @@ class DurableExecution:
                 except FillPriceUnavailable:
                     unresolved = True
             if order.get('status') not in TERMINAL: unresolved = True
+        if not await self.recover_native_exits(): unresolved = True
         await self.sync_accounting()
         if not self.emergency_mode and not await self.recover_protection_intents(): unresolved = True
         return not unresolved
 
     async def settle_before_close(self, symbol):
         """Cancel/confirm a live remainder before sending a new reducing order."""
+        pos = self.pending_protection.get(symbol)
+        if pos: await self.inspect_native_exits(symbol, pos, strict=False)
         for client_id, intent in list(self.intents.items()):
             if intent['symbol'] != symbol or intent['type'] != 'market' or intent['status'] == 'rejected': continue
             record = self.executions.get(self.execution_key(symbol, intent.get('order_id')))
