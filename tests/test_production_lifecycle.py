@@ -62,7 +62,7 @@ def test_real_constructor_three_symbols_and_exact_round_trip(tmp_path, monkeypat
 def test_production_wiring_fault_matrix(tmp_path, monkeypatch, fault):
     async def check():
         server = FuturesSimulator()
-        bot = await production_bot(tmp_path, monkeypatch, server)
+        bot = await production_bot(tmp_path, monkeypatch, server, hard_policy=True)
         symbol = bot.exchange.symbol('AIOUSDT')
         server.lose_entry_response = fault == 'lost_entry'
         server.delay_accounting = fault == 'late_fills'
@@ -123,14 +123,16 @@ def test_restart_after_abrupt_abort_between_post_and_response(tmp_path, monkeypa
             else: await bot.close_position(symbol, 'audit_exit')
         await bot.exchange.close()
         restored = await production_bot(tmp_path, monkeypatch, server, startup=False)
-        with pytest.raises(ValueError, match='manual review'):
-            await restored.safety.startup()
-        assert restored.safety.kill.triggered == 'unclean_session_review'
-        assert not restored.safety.ready and not server.position_rows()
-        assert len(server.orders) == 2  # one entry, one actual reducing execution
-        assert len(restored.exchange.trades) == 2
-        assert len([t for t in restored.exchange.trades if t.get('exit_detail')]) == 1
-        assert not await restored.exchange.get_open_orders()
+        await restored.safety.startup()
+        assert restored.safety.ready and not restored.safety.kill.blocks_entries
+        assert len(server.orders) == (1 if when == 'entry' else 2)
+        if when == 'entry':
+            assert symbol in restored.positions and restored.positions[symbol]['protection']
+            assert not await restored.enter(symbol, 'buy', .05)
+        else:
+            assert not server.position_rows()
+            assert len([t for t in restored.exchange.trades if t.get('exit_detail')]) == 1
+            assert not await restored.exchange.get_open_orders()
         await restored.exchange.close()
     run(check())
 

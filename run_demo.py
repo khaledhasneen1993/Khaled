@@ -7,6 +7,8 @@ from exchange.demo import validate_demo
 
 
 def main():
+    from infra.json_logging import configure
+    configure()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--dashboard', action='store_true', help='Publish to the existing dashboard using local token')
     args = parser.parse_args()
@@ -22,7 +24,8 @@ def main():
             from run_paper_live import CloudPublisher, run
             token = os.getenv('CASCADE_DASHBOARD_TOKEN')
             if not token: raise ValueError('Set dashboard token locally for --dashboard')
-            asyncio.run(run(bot, cloud_publisher=CloudPublisher(bot, 'khaled-demo', token)))
+            from run_bot import serve
+            asyncio.run(serve(bot, run(bot, cloud_publisher=CloudPublisher(bot, 'khaled-demo', token))))
         else:
             from run_bot import serve
             asyncio.run(serve(bot))

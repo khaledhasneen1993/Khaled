@@ -28,6 +28,7 @@ class OperationalJournal:
         except OSError:
             self.failed = True
             return False
+        self.failed = False
         return True
 
     def last_n(self, n):

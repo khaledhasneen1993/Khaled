@@ -10,16 +10,15 @@ from futures_simulator import FuturesSimulator, production_bot
 from test_live_transport import live, run
 
 
-def test_clanker_stored_stop_is_safe_despite_mark_below_stop(live):
-    # Stored CLANKER levels are real incident data. The two current prices are
-    # test inputs; their exact historical values were not captured by 3.2.1.
+def test_stored_stop_is_safe_despite_mark_below_stop(live):
+    # Entirely synthetic values preserve the liquidation/trigger relationship.
     symbol = 'BTC/USDT:USDT'
-    pos = dict(side='buy', entry=17.8, amount=551.45, leverage=20,
-               sl=17.66, tp=18.0136, signal_id='kh_clanker_regression')
-    actual = dict(liquidationPrice='17.23892878', markPrice='17.65', _trigger_price=17.68)
+    pos = dict(side='buy', entry=100, amount=10, leverage=20,
+               sl=99.2, tp=101.2, signal_id='kh_synthetic_regression')
+    actual = dict(liquidationPrice='97', markPrice='99.1', _trigger_price=99.3)
     live.constrain_actual_liquidation(symbol, pos, actual)
-    assert pos['sl'] == 17.66
-    assert D('17.66') > D(actual['liquidationPrice']) * D('1.003')
+    assert pos['sl'] == 99.2
+    assert D('99.2') > D(actual['liquidationPrice']) * D('1.003')
     run(live.close())
 
 
@@ -67,7 +66,7 @@ def test_actual_liquidation_buffer_breach_still_latches(tmp_path, monkeypatch):
     async def check():
         import json
         server = FuturesSimulator()
-        bot = await production_bot(tmp_path, monkeypatch, server)
+        bot = await production_bot(tmp_path, monkeypatch, server, hard_policy=True)
         symbol, raw = bot.exchange.symbol('AIOUSDT'), 'AIOUSDT'
         assert await bot.enter(symbol, 'buy', .05)
         liquidation = D(server.position_rows(raw)[0]['liquidationPrice'])

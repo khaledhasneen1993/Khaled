@@ -197,7 +197,7 @@ def test_retirement_queue_survives_restart_with_other_healthy_position(tmp_path,
 
 def test_failed_scoped_emergency_close_is_explicit_account_escalation(tmp_path,monkeypatch):
     async def check():
-        server=symbols_server();bot=await production_bot(tmp_path,monkeypatch,server)
+        server=symbols_server();bot=await production_bot(tmp_path,monkeypatch,server, hard_policy=True)
         idol,ake=bot.exchange.symbol('IDOLUSDT'),bot.exchange.symbol('AKEUSDT')
         assert await bot.enter(idol,'buy',120)
         async def send(request):

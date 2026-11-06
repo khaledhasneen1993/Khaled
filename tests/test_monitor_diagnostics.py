@@ -35,17 +35,24 @@ def test_monitor_stage_is_recorded_without_exception_text(live, tmp_path, stage)
             safety.evidence.sample.side_effect = ValueError(sensitive)
         else:
             bot.save = Mock(side_effect=OSError(sensitive))
-        with pytest.raises(MonitorStopped): await safety.monitor()
-        safety.trip.assert_awaited_once_with('monitor_failure')
+        if stage in ('account_refresh', 'state_save'):
+            from unittest.mock import patch
+            with patch('infra.supervisor.asyncio.sleep', side_effect=MonitorStopped()):
+                with pytest.raises(MonitorStopped): await safety.monitor()
+            safety.trip.assert_not_awaited()
+        else:
+            with pytest.raises(MonitorStopped): await safety.monitor()
+            safety.trip.assert_awaited_once_with('monitor_failure')
         content = (safety.journal.root / 'events.log').read_text()
         records = [json.loads(line) for line in content.splitlines()]
-        record = next(r for r in records if r['event'] == 'monitor_exception')
+        event = {'account_refresh':'monitor_retry', 'state_save':'storage_snapshot_failed'}.get(stage, 'monitor_exception')
+        record = next(r for r in records if r['event'] == event)
         assert record['stage'] == stage and record['error_type']
         if stage == 'account_refresh':
             assert record['http_status'] == 503 and record['exchange_error_code'] == -1007
         assert sensitive not in content and 'signature=' not in content
         assert record['source'] == 'infra/supervisor.py'
-        assert record['function'] == 'monitor' and type(record['line']) is int
+        assert record['function'] == ('save_safely' if stage == 'state_save' else 'monitor') and type(record['line']) is int
         await live.close()
     run(check())
 

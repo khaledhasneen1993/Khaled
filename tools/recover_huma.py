@@ -9,11 +9,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from tools.demo_preflight import ReadOnlyDemo, demo_config
 from infra.rate_limit import TokenBucket
+from journal.wal import WriteAheadLog
 from infra.journal import atomic_json
 
 
-async def recover(exchange):
-    cfg = exchange.cfg['demo']
+async def recover(exchange, history=None):
+    cfg = {**exchange.cfg['demo'], **(history or {})}
+    if any(cfg.get(key) is None for key in ('huma_entry_order_id', 'huma_close_order_id', 'huma_confirmed_realized_pnl')):
+        raise ValueError('Provide historical order IDs and expected PnL using --history-config locally')
     symbol = cfg['huma_symbol']
     result = {'symbol': symbol, 'mode': 'testnet', 'recovered': True, 'source': 'Binance',
         'historical_atr': None, 'historical_tp': None, 'historical_sl': None,
@@ -56,12 +59,13 @@ def apply_recovery(path, result, expected):
         if saved[key] != result: raise ValueError('Conflicting existing recovery')
         return False
     saved[key] = result
-    atomic_json(path, saved)
+    WriteAheadLog(path.parent / 'journal.wal').snapshot(path, saved)
     return True
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--history-config', type=Path, help='Local JSON with order IDs and expected PnL; never commit it')
     parser.add_argument('--apply', action='store_true')
     parser.add_argument('--expected-sha256', help='Hash printed by the prior preview')
     args = parser.parse_args()
@@ -69,7 +73,8 @@ def main():
         cfg = demo_config(); ec = cfg['exchange']
         ex = ReadOnlyDemo(cfg, TokenBucket(ec['rate_per_sec'], ec['rate_burst']))
         try:
-            result = await recover(ex)
+            history = json.loads(args.history_config.read_text()) if args.history_config else None
+            result = await recover(ex, history)
             print(json.dumps(result, indent=2)); print('preview_sha256=' + digest(result))
             if args.apply:
                 changed = apply_recovery(Path(ec['state_dir']) / 'testnet' / 'recovered_history.json', result, args.expected_sha256)

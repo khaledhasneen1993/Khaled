@@ -90,7 +90,7 @@ def test_spread_requires_real_warmup_and_pause_expires():
 def test_spread_block_preserves_open_position_and_native_order(tmp_path,monkeypatch):
     async def check():
         server=FuturesSimulator()
-        bot=await production_bot(tmp_path,monkeypatch,server)
+        bot=await production_bot(tmp_path,monkeypatch,server, hard_policy=True)
         symbol=bot.exchange.symbol('AIOUSDT')
         assert await bot.enter(symbol,'buy',.05)
         old=copy.deepcopy(bot.positions[symbol]['protection'])
@@ -111,6 +111,7 @@ def test_spread_block_preserves_open_position_and_native_order(tmp_path,monkeypa
 def test_daily_drawdown_blocks_entries_but_keeps_normal_exit_management(tmp_path):
     async def check():
         data=StreamData();bot=V2PaperHunter(tmp_path/'state.json',market_data=data)
+        bot.safety.kill.mode = 'hard'
         assert await bot.enter('BTC/USDT:USDT','buy',100)
         await bot.safety.trip('daily_drawdown')
         assert bot.positions and len(bot.exchange.trades)==1
@@ -125,7 +126,9 @@ def test_daily_drawdown_blocks_entries_but_keeps_normal_exit_management(tmp_path
 def test_daily_dd_flatten_is_explicit_operator_policy(tmp_path):
     async def check():
         bot=V2PaperHunter(tmp_path/'state.json',market_data=StreamData())
+        bot.safety.kill.mode = 'hard'
         bot.cfg['kill_switch']['daily_drawdown_action']='flatten'
+        bot.safety.kill.cfg['daily_drawdown_action']='flatten'
         assert await bot.enter('BTC/USDT:USDT','buy',100)
         await bot.safety.trip('daily_drawdown')
         assert not bot.positions
@@ -244,6 +247,7 @@ def test_trail_native_replace_and_restart_preserve_extreme_and_exact_accounting(
 def test_critical_protection_failure_escalates_entry_only_daily_latch(tmp_path):
     async def check():
         bot=V2PaperHunter(tmp_path/'state.json',market_data=StreamData())
+        bot.safety.kill.mode = 'hard'
         assert await bot.enter('BTC/USDT:USDT','buy',100)
         await bot.safety.trip('daily_drawdown')
         assert bot.positions
@@ -335,6 +339,7 @@ def test_small_rounding_difference_does_not_flatten_healthy_position(tmp_path,mo
 def test_failed_json_state_save_cannot_block_emergency_close(tmp_path):
     async def check():
         bot=V2PaperHunter(tmp_path/'state.json',market_data=StreamData())
+        bot.safety.kill.mode = 'hard'
         assert await bot.enter('BTC/USDT:USDT','buy',100)
         bot.save=lambda: (_ for _ in ()).throw(ValueError('nonfinite JSON snapshot'))
         with patch('asyncio.sleep',new_callable=AsyncMock):

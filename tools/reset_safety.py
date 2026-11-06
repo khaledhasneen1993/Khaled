@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from journal.wal import WriteAheadLog
 from infra.journal import OperationalJournal, atomic_json
 from risk.kill_switch import KillSwitch
 from risk.config import load_config
@@ -59,7 +60,7 @@ def main():
         cfg = load_config()
         try: data = reviewed_reset_state(data, path.parent, cfg)
         except ValueError as error: parser.error(str(error))
-        atomic_json(path, data)
+        WriteAheadLog(path.parent / 'journal.wal').snapshot(path, data)
         atomic_json(path.parent / cfg['exchange']['session_guard_filename'], {'active': False, 'reviewed': True})
         OperationalJournal(path.parent / 'journal').log('kill_manual_reset')
     print('Reviewed local latch reset. Risk counters retained; startup reconciliation and risk gates still apply.')

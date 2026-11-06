@@ -226,7 +226,8 @@ class PaperExchange:
 
 class PaperState:
     def restore(self):
-        state = json.loads(self.state_path.read_text(encoding="utf-8"))
+        from journal.wal import load_durable
+        state = load_durable(self.state_path)
         saved_settings = dict(state["settings"])
         saved_settings.setdefault("execution_mode", "paper")
         if saved_settings.get("position_basis") == "wallet_total":
@@ -291,7 +292,8 @@ class PaperState:
             "strategy_positions": self.positions, "prices": self.exchange.prices,
             "last_trade": self.last_trade, "trades": self.exchange.trades,
         }
-        atomic_json(self.state_path, state)
+        from journal.wal import WriteAheadLog
+        WriteAheadLog(self.state_path.parent / 'journal.wal').snapshot(self.state_path, state, writer=atomic_json)
 
     async def report(self):
         while True:

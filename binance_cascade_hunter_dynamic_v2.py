@@ -260,10 +260,15 @@ class CascadeHunter:
         """مراقبة الخروج بشكل مستمر بين المسحات"""
         while True:
             try:
+                if hasattr(self, 'process_watchdog'): self.process_watchdog.heartbeat('order_manager')
                 async with self.lock:
                     await self.manage_exits()
                 await asyncio.sleep(self.cfg["exit"]["check_sec"])
             except Exception as e:
+                from infra.resilience import transient_error
+                if transient_error(e):
+                    await asyncio.sleep(1)
+                    continue
                 if getattr(self, 'execution_mode', 'paper') != 'paper':
                     from infra.errors import diagnostic_fields
                     async with self.lock:

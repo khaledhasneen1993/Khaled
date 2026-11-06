@@ -56,6 +56,7 @@ class V2Tests(unittest.IsolatedAsyncioTestCase):
         self.bot.save()
         state=json.loads(self.path.read_text())
         state['settings']['MAX_POSITION_PCT']=.85
+        (self.path.parent / 'journal.wal').unlink(missing_ok=True)
         self.path.write_text(json.dumps(state))
         before=self.path.read_bytes()
         with self.assertRaises(ValueError): V2PaperHunter(self.path,fee_rate=0,market_data=self.data)

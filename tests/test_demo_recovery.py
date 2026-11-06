@@ -175,7 +175,8 @@ def test_sl_or_tp_failure_closes_affected_symbol(live, tmp_path, failure_kind):
         return send
     async def check():
         bot, server = await prepare(live, tmp_path, handler)
-        assert not await bot.enter(SYMBOL, 'buy', 100)
+        with patch('asyncio.sleep', new_callable=AsyncMock):
+            assert not await bot.enter(SYMBOL, 'buy', 100)
         assert not server.qty and not bot.safety.kill.triggered
         assert live.management_faults[SYMBOL]['reason'] == 'entry_confirmed_management_failed'
         assert len(live.trades) == 2 and live.trades[-1]['emergency']
@@ -278,15 +279,15 @@ def test_huma_preview_and_idempotent_import(tmp_path):
     calls = []
     async def request(method, path, params, **kw):
         calls.append(method)
-        entry = params['orderId'] == 247831476
+        entry = params['orderId'] == 100
         if path.endswith('/order'):
             return {'symbol': 'HUMAUSDT', 'orderId': params['orderId'], 'status': 'FILLED',
-                'side': 'BUY' if entry else 'SELL', 'executedQty': '355544', 'avgPrice': '0.0138250' if entry else '0.0138220', 'reduceOnly': not entry}
-        return [{'qty': '355544', 'commissionAsset': 'USDT', 'commission': '0', 'realizedPnl': '0' if entry else '-1.06663200'}]
+                'side': 'BUY' if entry else 'SELL', 'executedQty': '10', 'avgPrice': '0.10' if entry else '0.05', 'reduceOnly': not entry}
+        return [{'qty': '10', 'commissionAsset': 'USDT', 'commission': '0', 'realizedPnl': '0' if entry else '-0.5'}]
     async def check():
         ex = SimpleNamespace(cfg=load_config(), _request=request)
-        result = await recover(ex)
-        assert result['historical_atr'] is None and result['realized_pnl'] == '-1.06663200'
+        result = await recover(ex, {'huma_entry_order_id': 100, 'huma_close_order_id': 101, 'huma_confirmed_realized_pnl': '-0.5'})
+        assert result['historical_atr'] is None and result['realized_pnl'] == '-0.5'
         path = tmp_path / 'history.json'
         assert not path.exists()
         assert apply_recovery(path, result, digest(result))

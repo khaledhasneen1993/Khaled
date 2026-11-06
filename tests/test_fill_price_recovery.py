@@ -52,7 +52,7 @@ def test_filled_first_response_missing_average_recovers_without_extra_post(tmp_p
 def test_unavailable_entry_price_keeps_fill_fact_closes_and_later_accounts_once(tmp_path, monkeypatch, restart):
     async def check():
         server = FuturesSimulator()
-        bot = await production_bot(tmp_path, monkeypatch, server)
+        bot = await production_bot(tmp_path, monkeypatch, server, hard_policy=True)
         live, symbol = bot.exchange, bot.exchange.symbol('AIOUSDT')
         async def handler(request):
             response = await server(request)
@@ -80,7 +80,7 @@ def test_unavailable_entry_price_keeps_fill_fact_closes_and_later_accounts_once(
             reviewed_reset_state(state, bot.state_path.parent, bot.cfg)
         await live.close()
         if restart:
-            bot = await production_bot(tmp_path, monkeypatch, server, startup=False)
+            bot = await production_bot(tmp_path, monkeypatch, server, startup=False, hard_policy=True)
             live = bot.exchange
         else:
             live.client = httpx.AsyncClient(base_url=bot.cfg['exchange']['base_url_testnet'], transport=httpx.MockTransport(server))
@@ -155,7 +155,7 @@ def test_filled_close_price_pending_never_resends_close(tmp_path, monkeypatch, r
 def test_late_pricing_of_partial_exit_keeps_actual_last_exit_reason(tmp_path, monkeypatch):
     async def check():
         server = FuturesSimulator()
-        bot = await production_bot(tmp_path, monkeypatch, server)
+        bot = await production_bot(tmp_path, monkeypatch, server, hard_policy=True)
         live, symbol = bot.exchange, bot.exchange.symbol('AIOUSDT')
         assert await bot.enter(symbol, 'sell', .05)
         server.partial_close = True

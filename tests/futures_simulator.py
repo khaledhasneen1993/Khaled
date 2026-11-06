@@ -211,7 +211,7 @@ class FuturesSimulator:
         return httpx.Response(400, json={'code': -2013}) if data is None else httpx.Response(200, json=data)
 
 
-async def production_bot(tmp_path, monkeypatch, server, startup=True, legacy=False):
+async def production_bot(tmp_path, monkeypatch, server, startup=True, legacy=False, hard_policy=False):
     if legacy:
         from legacy_config import legacy_execution_config
         cfg = legacy_execution_config()
@@ -224,7 +224,15 @@ async def production_bot(tmp_path, monkeypatch, server, startup=True, legacy=Fal
     monkeypatch.setenv('BINANCE_API_SECRET', 'offline-secret')
     monkeypatch.setattr('paper_runtime.load_config', lambda: copy.deepcopy(cfg))
     bot = V2PaperHunter('state.json')  # Actual Demo constructor and supervisor wiring.
+    if hard_policy:
+        # Explicitly exercise the retained hard policy with a simulated transport.
+        from risk.kill_switch import KillSwitch
+        saved_kill = bot.safety.kill.dump()
+        bot.safety.kill = KillSwitch(cfg['kill_switch'])
+        bot.safety.kill.restore(saved_kill)
+        if bot.safety.kill.blocks_entries: bot.safety.ready = False
     live = bot.exchange
+    live.on_api_error = bot.safety.kill.on_api_error
     await live.client.aclose()
     live.client = httpx.AsyncClient(base_url=cfg['exchange']['base_url_testnet'], transport=httpx.MockTransport(server))
     for name in ('rl', 'weights', 'orders_short', 'orders_long'):

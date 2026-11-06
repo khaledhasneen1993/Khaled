@@ -60,10 +60,13 @@ class DynamicPaperHunter(dynamic.CascadeHunter, PaperState):
         self._state_lock = None
         self._owns_state = self.execution_mode == "paper"
         self._management_authorized = False
+        from infra.watchdog import Watchdog
+        self.process_watchdog = Watchdog(self.cfg['process'])
         self.safety = SafetySupervisor(self)
         if self.execution_mode != "paper":
             self.exchange.on_api_error = self.safety.kill.on_api_error
-        if self.state_path.exists() and not reset:
+        from journal.wal import WriteAheadLog
+        if (self.state_path.exists() or self.state_path.name in WriteAheadLog(self.state_path.parent / 'journal.wal').latest()) and not reset:
             self.restore()
         self.scanner = ContinuousScanner(self, config=self.strategy)
 
@@ -112,12 +115,12 @@ class DynamicPaperHunter(dynamic.CascadeHunter, PaperState):
                 self.positions.setdefault(pending_symbol, pending)
             await self.safety.handle_symbol_failure(symbol, 'entry_confirmed_management_failed')
             result = False
-        elif self.safety.kill.triggered and self.safety.active:
+        elif self.safety.kill.blocks_entries and self.safety.active:
             await self.safety.trip(self.safety.kill.triggered)
             result = False
         elif result and self.safety.active:
             await self.safety.event("trade_opened", symbol=symbol, reason=side)
-        self.save()
+        self.safety.save_safely()
         return result
 
     def merge_execution_state(self):
@@ -272,7 +275,9 @@ class DynamicPaperHunter(dynamic.CascadeHunter, PaperState):
     def remove_position(self, symbol):
         self.positions.pop(symbol, None)
 
-    def on_market_heartbeat(self): self.safety.heartbeat()
+    def on_market_heartbeat(self):
+        self.safety.heartbeat()
+        self.scanner.ws_policy.connected()
 
     def on_order_book(self, symbol, book): self.safety.observe_book(symbol, book)
 
@@ -472,16 +477,22 @@ class DynamicPaperHunter(dynamic.CascadeHunter, PaperState):
                 try: fcntl.flock(self._state_lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
                 except OSError: raise ValueError("Another process owns this live account") from None
                 self._owns_state = True
+            from infra.health_server import HealthServer
+            self.health_server = HealthServer(self)
+            if self.cfg['health']['enabled']: await self.health_server.start()
             await self.exchange.load_markets()
             if self.initial_balance is None: self.initial_balance = self.exchange.equity
             await self.safety.startup()
             self.save()
             dynamic.log.info("CONTINUOUS %s | equity=%.4f | state=%s", self.execution_mode,
                              self.exchange.equity, self.state_path)
+            for component in self.cfg['process']['component_timeout_sec']:
+                self.process_watchdog.heartbeat(component)
             tasks = [asyncio.create_task(self.scan_loop()),
                      asyncio.create_task(self.exit_watcher()),
                      asyncio.create_task(self.report()), asyncio.create_task(self.safety.monitor()),
                      asyncio.create_task(self.safety.watchdog()),
+                     asyncio.create_task(self.process_watchdog.run()),
                      asyncio.create_task(self.safety.alerter._worker())]
             await asyncio.gather(*tasks)
         finally:
@@ -494,9 +505,13 @@ class DynamicPaperHunter(dynamic.CascadeHunter, PaperState):
                     shutdown_worker = asyncio.create_task(self.safety.alerter._worker())
                     try:
                         reason = "process_shutdown" if cause in (None, asyncio.CancelledError, KeyboardInterrupt) else "runtime_failure"
-                        await self.safety.trip(reason)
+                        self.safety.ready = False
+                        self.save()
+                        await self.safety.event('graceful_shutdown', 'warning', reason=reason)
+                        from infra.journal import atomic_json
+                        atomic_json(self.state_path.parent / self.cfg['exchange']['session_guard_filename'], {'active': False})
                         if self.safety.alerter.enabled:
-                            await asyncio.wait_for(self.safety.alerter.queue.join(), self.cfg["alerts"]["shutdown_timeout_sec"])
+                            await asyncio.wait_for(self.safety.alerter.queue.join(), min(3, self.cfg["alerts"]["shutdown_timeout_sec"]))
                     except Exception:
                         if self.safety.journal: self.safety.journal.log("shutdown_incomplete")
                     finally:
@@ -504,6 +519,7 @@ class DynamicPaperHunter(dynamic.CascadeHunter, PaperState):
                         await asyncio.gather(shutdown_worker, return_exceptions=True)
                 if self._owns_state: self.save()
             finally:
+                if hasattr(self, 'health_server'): await self.health_server.close()
                 await self.exchange.close()
                 if self._state_lock:
                     self._state_lock.close()

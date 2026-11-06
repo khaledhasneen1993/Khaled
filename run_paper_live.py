@@ -153,7 +153,7 @@ async def run(bot, publisher=None, cloud_publisher=None):
         await asyncio.gather(*tasks)
     finally:
         for task in tasks:
-            task.cancel()
+            if not task.done() and not task.cancelling(): task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         if publisher is not None:
             await publisher.stopped()

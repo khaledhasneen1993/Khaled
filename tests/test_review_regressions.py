@@ -151,13 +151,14 @@ def test_risk_builder_failure_records_fill_and_emergency_accounting(live,tmp_pat
     run(check())
 
 
-def test_full_disk_fsync_failure_still_closes_and_latches(live,tmp_path):
+def test_full_disk_fsync_failure_preserves_native_protection_and_latches(live,tmp_path):
     async def check():
         bot,server=await runtime_with_transport(live,tmp_path)
         assert await bot.enter(S,'buy',100)
         with patch('infra.journal.os.fsync',side_effect=OSError('full disk')):
             await bot.safety.trip('storage_failure')
-        assert not server.qty and len(server.orders)==2
+        assert server.qty and len(server.orders)==1
+        assert all(a['algoStatus']=='NEW' for a in server.algos.values())
         assert live.storage_fault and bot.safety.storage_failed
         assert bot.safety.kill.triggered and not bot.safety.ready
         assert not await bot.enter(S,'buy',100)
@@ -353,7 +354,7 @@ def test_disk_failure_and_lost_close_response_do_not_resend(live,tmp_path):
         live.client=httpx.AsyncClient(base_url='https://example.test',transport=httpx.MockTransport(handler))
         with patch('infra.journal.os.fsync',side_effect=OSError('full disk')):
             await bot.safety.trip('storage_failure')
-        assert not server.qty and len(posts)==1 and len(server.orders)==2
+        assert server.qty and not posts and len(server.orders)==1
         assert bot.safety.kill.triggered and live.storage_fault
         await live.close()
     run(check())

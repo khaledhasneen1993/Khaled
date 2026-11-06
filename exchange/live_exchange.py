@@ -24,6 +24,8 @@ from paper_account import PaperExchange
 from infra.journal import OperationalJournal, atomic_json
 from infra.http_logging import secure_http_logging
 from infra.rate_limit import TokenBucket, with_backoff
+from journal.wal import WriteAheadLog, load_durable
+from infra.circuit_breaker import CircuitBreaker
 from .orders import ExchangeError, ExecutionUnknown, safe_create_order
 from .execution import DurableExecution
 from .management import ProtectionRecovery
@@ -87,17 +89,21 @@ class LiveExchange(DurableExecution, NativeExitState, ProtectionRecovery, PaperE
         self._leverage_lock = asyncio.Lock()
         self.journal = OperationalJournal(Path(ec['state_dir']) / self.mode / 'journal')
         self.intent_path = Path(ec['state_dir']) / self.mode / 'order_intents.json'
-        self.intents = json.loads(self.intent_path.read_text()) if self.intent_path.exists() else {}
+        self.intents = load_durable(self.intent_path)
+        self.breaker = CircuitBreaker(cfg['circuit_breaker'], failure_predicate=lambda error:
+            isinstance(error, (httpx.HTTPError, asyncio.TimeoutError)) or
+            isinstance(error, ExchangeError) and (error.status in (0, 418, 429) or error.status >= 500))
+        self.wal = WriteAheadLog(self.intent_path.parent / 'journal.wal')
         self.on_api_error = None
         self.pending_protection = {}
         self.selected_leverage = {}
         self.brackets = {}
         self.execution_path = self.intent_path.parent / 'executions.json'
-        self.executions = json.loads(self.execution_path.read_text()) if self.execution_path.exists() else {}
+        self.executions = load_durable(self.execution_path)
         protection_path = self.intent_path.parent / 'protection.json'
-        if protection_path.exists(): self.pending_protection = json.loads(protection_path.read_text())
+        self.pending_protection = load_durable(protection_path)
         self.management_path = self.intent_path.parent / ec['management_filename']
-        self.management_faults = json.loads(self.management_path.read_text()) if self.management_path.exists() else {}
+        self.management_faults = load_durable(self.management_path)
         self.execution_fault = None
         self.emergency_mode = False
         self.storage_fault = False
@@ -108,7 +114,7 @@ class LiveExchange(DurableExecution, NativeExitState, ProtectionRecovery, PaperE
         if not hasattr(self, '_state_digests'): self._state_digests = {}
         if self._state_digests.get(path) == digest and path.exists(): return
         try:
-            atomic_json(path, value)
+            self.wal.snapshot(path, value, writer=atomic_json)
         except OSError:
             self.storage_fault = True
             self.execution_fault = 'storage_failure'
@@ -189,6 +195,13 @@ class LiveExchange(DurableExecution, NativeExitState, ProtectionRecovery, PaperE
         return {**value, 'signature': signature}
 
     async def _request(self, method, path, params=None, signed=True, retry=False):
+        if method != 'GET' and hasattr(self, 'wal'):
+            try:
+                self.wal.log({'event': 'financial_request', 'method': method, 'path': path, 'params': params or {}})
+            except OSError:
+                self.storage_fault = True
+                self.execution_fault = 'storage_failure'
+                raise
         clock_recovered = False
         async def once():
             nonlocal clock_recovered
@@ -236,8 +249,17 @@ class LiveExchange(DurableExecution, NativeExitState, ProtectionRecovery, PaperE
                     self._blocked_until = max(self._blocked_until, time.monotonic() + after)
                 raise ExchangeError(response.status_code, data.get('code', 0) if isinstance(data, dict) else 0, after)
             return data
-        return await with_backoff(once, max_retries=self.cfg['exchange']['max_retries'],
-                                  base=self.cfg['exchange']['backoff_base']) if retry and method == 'GET' else await once()
+        async def guarded_once():
+            if method == 'GET' and not self.emergency_mode and hasattr(self, 'breaker'):
+                return await self.breaker.call(once)
+            return await once()
+        # Bound a whole GET including rate-limit waits/backoff, so network
+        # outages do not masquerade as a hung order/reconciliation component.
+        if method == 'GET':
+            async with asyncio.timeout(self.cfg['circuit_breaker']['request_budget_sec']):
+                return await with_backoff(guarded_once, max_retries=self.cfg['exchange']['max_retries'],
+                    base=self.cfg['exchange']['backoff_base']) if retry else await guarded_once()
+        return await guarded_once()
 
     async def sync_time(self):
         start = time.time() * 1000

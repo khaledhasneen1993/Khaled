@@ -1,53 +1,64 @@
-# تقرير تحقق Khaled 4.0.2
+# Khaled 4.1.0 validation — 2026-11-06
 
-العمل بتاريخ2026-11-06، من رأس main المؤكد `b22998b435b77e92eef9ea3216b8e1adfb7afb5f`، الإصدار4.0.1. النطاق إصلاح مسار حماية صفقة منفّذة وتسوية إلغائها؛ لم يُعدّل Final أو حالة الهاتف، ولم تُستخدم مفاتيح حقيقية أو تُرسل أوامر Demo/Mainnet.
+Source base: main at `c05506f110cc51bf8c784e62d44305af0df82c5b` (4.0.2).
 
-## العطل المثبت
+Status: source implementation and offline validation completed; **72-hour Demo soak pending**. No claim of two-week unattended readiness or Mainnet approval. No Demo/Mainnet orders were sent during development. Final was not modified. No phone runtime was accessed. Binance and Telegram credentials are absent in this environment.
 
-أُضيفت ثلاثة اختبارات بمحاكاة HTTP من مُنشئ Demo الإنتاجي قبل الإصلاح؛ فشلت الثلاثة على4.0.1: رفض الحماية الأول لم يستفد من محاولة أخرى، فشل حماية AKE أغلق IDOL السليم أيضًا، وتعليق إلغاء Algo بعد ثبوت الإغلاق رفع خطأ أعاق الإغلاق المحلي. هذه إعادة إنتاج لعيوب التصعيد والتسوية، وليست إثباتًا لسبب رفض Binance الأول في الحادثة التاريخية؛ رسالة Telegram وحدها لا تكشفه.
+## Changes and retained behavior
 
-## المسار الجديد
+- Retained entry signals, freshness checks, 10x leverage, position/risk sizing, TP/SL and trailing calculations. The trading/exposure/ATR/exit configuration blocks compare equal to 4.0.2. Strategy edits only report exit-worker liveness and classify transient failures for retry.
+- Demo endpoint resolves to `observe` despite the existing transport/state name `testnet`. Independent testnet policy is `soft`; Mainnet always resolves to `hard` and hard thresholds, including flatten policy. Approved runners continue to refuse Mainnet.
+- Observe records and alerts without account flattening or kill-based entry pauses. Mandatory reconciliation, valid order facts, storage durability, per-symbol protection recovery and strategy filters remain gates.
+- Soft retains management and recovers after cooldown, healthy conditions and reconciliation under the trading lock. Hard policy's legacy regression coverage is now explicitly selected by simulated fixtures instead of assuming Demo must flatten.
+- All financial request mutations log to fsynced WAL before sending. Execution ledgers and account snapshots append/fsync WAL before atomic replacement. Latest snapshots are recovered even when JSON is corrupt or stale; only a torn final WAL line is ignored. Internal WAL corruption fails closed. Replaying never resends financial requests. Existing same-client-ID reconciliation adopts real fills.
+- Full disk prevents unjournaled financial requests, including emergency orders. Existing native protection stays. A durable storage probe and reconciliation are required before recovered storage authorizes entries. Prior tests expecting orders despite failed fsync were updated to the explicit new WAL requirement.
+- SIGTERM/SIGINT stop entries, allow up to two seconds for the locked action to drain, then persist, alert with a bounded wait, close clients and mark the session clean. They do not flatten or cancel protective orders. An unresolved in-flight POST still requires startup recovery; protection cannot be asserted before its confirmation.
+- Bounded GET request budgets and a single-probe circuit breaker; POST uncertainty continues through existing durable intent recovery, never automatic blind retry. WebSocket backoff/jitter wraps the existing parser and fresh-event gates.
+- Watchdog resource limits and component liveness, localhost health HTTP, structured logging, independent Telegram health watcher, portable Termux supervisor and systemd units. Systemd uses journald and unlimited restart retries; logrotate covers structured operational files.
 
-1. تُحفظ حقائق الدخول المنفّذ مستقلّة عن اكتمال الإدارة والمحاسبة. الحماية ثلاث محاولات إجمالية لكل دور، بفاصل0.5 ثم1 ثانية. الرفض المؤكد يسمح بمحاولة جديدة؛ غموض POST يوجب الاستعلام بالمعرّف المحفوظ نفسه دون إعادة إرسال عمياء.
-2. بعد استنفاد Algo يمكن تجربة STOP_MARKET عادي فقط إذا أعلن exchangeInfo دعمه ولم يبق أمر مشروط ملتبس. يلزم GET يؤكد الهوية والاتجاه وreduceOnly والكمية والسعر ومصدر التفعيل؛−4120/−1116 يعني عدم توفره، ويُحفظ ذلك. يعمل التريل واستعادة التنفيذ أيضًا مع البديل المقبول. لا نفترض أن Futures يدعم هذا المسار على كل حساب.
-3. فشل الحماية النهائي أو إدارة دخول مؤكد يُنتج حدث symbol_management_failed حرجًا وحالة دائمة، ثم إغلاق market مخفّض **للرمز المعني فقط**. ثلاث محاولات إغلاق مع قراءة الأوامر السابقة والكمية المتبقية؛ فقد الرد لا يبرر إغلاقًا مكررًا. إذا تعذر إثبات إغلاقه الآمن تُفعّل سياسة الحساب الصريحة symbol_emergency_close_failed.
-4. بعد ثبوت الإغلاق، تبقى حقيقة التنفيذ والمحاسبة. cancel/query للحماية حتى ثلاث محاولات؛ إذا ظل Algo ملتبسًا تُحفظ مهمة محدودة تمنع دخول الرمز فقط. تُستعاد المهمات والمحاسبة أثناء المراقبة وبعد إعادة التشغيل، بفاصل5ث للمهام المؤجلة. لا تُعاد محاسبة الإغلاق ولا يُعاد أمره بسبب تأخر إزالة الحماية.
-5. البديل يُنشأ ويُؤكد ويُحفظ قبل إزالة القديم؛ مراجع الحماية المستبدلة غير المحسومة تبقى للاستعادة. metadata الاستراتيجية والتنفيذ تُحفظ في management_faults.json مع الحالة والسبب والمعرّفات. مهلة منع إعادة الدخول بعد فشل إدارة الدخول600ث؛ preflight يعرض المهمات والمهلات، وreset يرفض المهمات المعلقة ولا يمحو التاريخ أو القفل.
+## Offline checks
 
-الأخطاء HTTP400 المشروطة المعروفة والمرفوضة يقينًا لا تُعامل كفشل اتصال عام. أخطاء المعدل والمصادقة والنقل والخادم تبقى محسوبة. الميزانية الخارجية للحماية لا تتضاعف داخل safe_create_order؛ اختبار429 يؤكد ثلاث POSTs وثلاث إشارات خطأ API.
+Full-suite result is recorded in the final verification below. Test sockets to external services are forbidden; HTTP execution uses simulated exchange transports.
 
-## السياسة المالية وحدود العزل
+The 12 chaos cases pass:
 
-لم تتغير ملفات استراتيجية الإشارة أو risk/trading_policy أو dynamic_stop أو kill_switch أو exposure_limits أو continuous_scanner. baseline القديم مطابق ماليًا؛ الجديد رقم الإصدار ومفاتيح exchange التشغيلية فقط. لا تغيير10×، الهامش المستهدف كسقف10% equity مع حد مخاطرة2.5% شامل التقديرات، أربعة مراكز، HARD_SL8% من fill، ولا TP ثابت، وتريل بعد1.5% بمسافة0.6% لا يتراجع. حالة4.0.1 متوافقة ولا تحتاج حذف runtime أو ترقية سياسة.
+| Case | Injected fault and assertion |
+|---|---|
+| 30s WS gap | Advance the reconnect-policy clock; no kill-based stop; reconnection resets the retry policy |
+| 10min WS gap | Advance heartbeat age; Demo records observe; Mainnet hard latches |
+| 20 API failures | Inject timeouts into real breaker calls; Demo does not halt |
+| 100 API failures | Feed the hard-policy error window; hard latches and requests flatten |
+| Process SIGKILL | Kill an actual subprocess after WAL fsync and before JSON replacement; recover the exact snapshot; inspect restart unit policy |
+| Corrupt state | Corrupt JSON and tear the WAL tail; recover exact state, append safely, compact and replay |
+| Full disk | Reject WAL writes before entry; no financial POST; retain responsive degraded health and block entries |
+| Memory/FD limit | Inject resource readings above thresholds; assert watchdog exit codes; no real memory exhaustion |
+| Network partition | Advance 5min outage and cooldown clocks; closed/open/half-open recovery and WS reconnection |
+| Concurrent restart | Hold the real account file lock; a second runtime refuses startup without a duplicate entry |
+| Crash after POST | Execute on a simulated exchange, abort before response; new Demo runtime reconciles/adopts/protects once |
+| Graceful trade shutdown | Cancel an actual running runtime via the idempotent signal handler path; assert open native stops and persisted state, no market close, completion below5s |
 
-فشل حماية AKE وحده لا يغلق IDOL. العزل لا يعطل حمايات الحساب المستقلة: تعذر الإغلاق الطارئ للرمز، تخزين غير آمن، دخول مجهول التنفيذ، خلل هوية/مصالحة حقيقي، انقطاع صحة حساب/اتصال، أو خرق buffer التصفية الفعلي تبقى ضمن سياساتها العامة. daily_drawdown افتراضيًا block_entries؛ flatten خيار المشغّل الموثق. السبريد يبقى منع دخول مؤقتًا دون إغلاق. لا يُصفّر أي kill قديم أو شرط مراجعة الجلسة غير السليمة تلقائيًا.
+Additional tests verify forced environments, soft cooldown/health recovery, a single concurrent half-open probe, failure of that probe and reopening, interior WAL corruption rejection, hung-component exit, fast read-only health snapshots, and Mainnet hard spread/loss responses. Existing regression tests retain exact fills, fees, protection replacement, loss accounting, quantity limits and secret-redaction coverage.
 
-## الملفات المتغيرة
+A separate local real-HTTP health measurement made100 requests: mean2.69ms, maximum52.54ms, below100ms. It used a synthetic in-memory account, not Binance. This does not prove latency under a72h workload.
 
-- baseline.json:4.0.2، محاولات الحماية والإغلاق والتسوية والبديل وفواصل الاستعادة وملف المهمة.
-- exchange/management.py الجديد: سجل الأعطال المحدودة، استرداد الحماية وبديلها وتسوية الإلغاء.
-- exchange/live_exchange.py وexecution.py وorders.py وprotection_state.py وreconciler.py: ربط النقل والنيات والتنفيذ والمحاسبة والمصالحة بالعزل والاستعادة.
-- infra/supervisor.py وpaper_runtime.py: إغلاق الرمز فقط، فصل الإغلاق المؤكد عن cleanup، والمحافظة على شروط التصعيد العام.
-- tools/demo_preflight.py وtools/reset_safety.py: عرض المهام ومنع تجاوز استرداد معلق.
-- tests/test_symbol_management.py الجديد، futures_simulator.py، test_demo_recovery.py وtest_live_transport.py وtest_production_lifecycle.py وtest_protection_prices.py وtest_quantity_limits.py: حالات العزل والاستعادة والبديل وتحديث توقعات التصعيد. تظل حالة دخول غير محسوم عامة كما كانت.
-- README.md وCHANGELOG.md وهذا التقرير: توثيق4.0.2 والسياسات والحدود.
+Other checks: Python compilation, `git diff --check`, shell syntax for the installer, trading-config equality, and the repository secret-pattern audit. The secret scan reported no candidate files; pattern scanning is not proof that no historical secret exists.
 
-## التحقق
+## Operational acceptance still pending
 
-```text
-pytest: 311 passed, 9 subtests passed in 55.95s
-py_compile: all 17 changed Python files passed
-git diff --check: passed
-```
+| Required evidence | Actual status |
+|---|---|
+|72 continuous hours on Demo |Not run: no credentials or connected phone/host runtime |
+|Real automatic restart count |Not measured; no service installed or trading started here |
+|Real observe incidents, trade count and PnL |Not measured; no invented values |
+|Systemd restart after process crash |Unit configuration checked; host installation/restart not exercised |
+|Two-week memory/FD/alert delivery reliability |Not established by unit tests |
+|Every financial execution accounted against Binance |Offline crash/replay scenarios pass; requires real exchange ledger review after soak |
+|Telegram notification within30s after process death |Independent10s watcher provided; requires a running watcher, working network and Telegram |
 
-الاختبارات16 الجديدة تغطي: رفض أول ثم نجاح، رفض نهائي وإغلاق الرمز فقط مع بقاء مركز وحماية IDOL، إلغاء معلق ثم استرداد، فقد رد Algo دون POST إضافي، بديل عادي مؤكد وتنفيذه الأصلي، رفض البديل−4120، إعادة التشغيل مع مهمة مؤجلة، فشل إغلاق الرمز والتصعيد العام الصريح، تحديث التريل العادي قبل إزالة القديم، فشل محاسبة/إدارة بعد fill، فقد رد إغلاق محلي، نجاح retry الإلغاء، عدم إرسال بديل أثناء غموض Algo، سعر تنفيذ أصلي مؤجل مع حساب flat، انقطاع بعد حفظ حقيقة fill ثم الاستعادة، وميزانية429 المحدودة مع بقاء عداد أخطاء الاتصال.
+On the user's configured host, run Demo with one supervisor and `tools/watch_health.py` separately, then run `python tools/soak_demo.py --hours 72`. It collects health latency, uptime resets, resource maxima, trade/PnL and observe counts. Only a full elapsed window with no health gaps/restarts or limit breaches can pass its automated criteria. A shortened/interrupted run remains pending. The collector validates that it is observing the Demo process in observe mode. Review native protection, reconciliation and the Binance ledger in addition to this report before adopting any longer-running readiness claim.
 
-تظل المجموعة الكاملة تغطي الإشارة والسياسة المالية، المخاطرة والتصفية، شروط السبريد والسحب، ATR التاريخي، partial فعلي دون ازدواج، فقد الرد والانقطاع والتخزين، RSA/HMAC، منع Mainnet وسرية التشخيص وتوافق اللوحة. جميع الاختبارات مع HTTP Mock وحظر sockets وإزالة متغيرات الاعتماد وعزل Paper؛ أضيف حظر فوري لأي HTTP غير mocked في fixture النقل لتجنب انتظار اتصال غير مقصود.
+## Final verification
 
-## الحدود المتبقية
+**330 tests passed, plus9 subtests**, including12/12 chaos cases. Command: `python -m pytest -q --timeout=60 --disable-warnings`; elapsed86.96s. The final health/environment checks also passed after adding the Demo-only soak identity check. No trading service or72-hour soak was started.
 
-هذا اعتماد مصدر مختبر بالمحاكاة، لا إثبات قبول حماية حساب المستخدم أو استقرار الهاتف. يلزم فحص Demo من المستخدم قبل تشغيله، وإبقاء النسخ الأخرى متوقفة. لا تعيد النسخة تصفير قفل الحادث السابق. رفض البديل العادي متوقع إذا كانت المنصة تفرض Algo؛ عندها ينفذ الإغلاق المحدود بدل الادعاء بوجود حماية.
-
-قد يبقى Algo مجهول الحالة في مهمة استرداد حتى عودة بيانات Binance؛ الرمز محجوز والسجل محفوظ. الاستعادة تمر ببوابات الجلسة والقفل المعتادة، ولا يوجد وعد exactly-once أو وقف مضمون خلال الفجوات والانزلاق وتعطل الشبكة. لا تغيير للنتائج التاريخية أو اختلاق مستويات قديمة.
-
-مراجع Binance: [الأوامر العادية وAlgo وواجهات الاستعلام والإلغاء](https://developers.binance.com/en/docs/catalog/core-trading-derivatives-trading-usd-s-m-futures/api/rest-api/trade)، [سجل التغييرات ونقل الأوامر المشروطة إلى Algo](https://developers.binance.com/en/docs/products/derivatives-trading-usds-futures/change-log). اختلاف إعلان orderTypes عن قبول المنصة يُحسم بالتأكيد الفعلي، لا بالإعلان وحده.
+Historical identifiers and realized PnL were removed from the published baseline/README. Optional historical recovery now requires a local history-config file. Regression examples use synthetic data; trading logic is unchanged.

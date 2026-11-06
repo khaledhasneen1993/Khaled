@@ -55,6 +55,9 @@ class ContinuousScanner:
         self.changed = asyncio.Event()
         self.ready = asyncio.Event()
         self.connected = False
+        from exchange.ws_manager import ResilientWebSocket
+        cfg = getattr(bot, 'cfg', default_config.load_config() if hasattr(default_config, 'load_config') else {})
+        self.ws_policy = ResilientWebSocket(cfg.get('ws', {'hard_offline_sec': 300, 'reconnect_max_delay_sec': 60}))
         self.book_lock = asyncio.Lock()
         self.next_book_request = 0.0
         self.book_pause_until = 0.0
@@ -255,7 +258,7 @@ class ContinuousScanner:
                     mode = getattr(self.bot, "execution_mode", "paper")
                     ws_url = WS_URL if mode == "paper" else self.bot.cfg["exchange"]["ws_url_" + mode]
                     url = ws_url + "?" + urlencode({"streams": streams})
-                    async with session.ws_connect(url, heartbeat=20, receive_timeout=30) as socket:
+                    async with session.ws_connect(url, heartbeat=getattr(self.bot, 'cfg', {}).get('ws', {}).get('ping_interval_sec', 20), receive_timeout=30) as socket:
                         self.connected = True
                         self.config.log.info("CONTINUOUS WATCH CONNECTED | symbols=%d | entries checked on updates", len(warmed))
                         delay = 1
@@ -275,11 +278,16 @@ class ContinuousScanner:
                 except Exception as error:
                     self.connected = False
                     self.config.log.warning("Candle stream reconnect in %ss: %s", delay, error)
+                    delay = self.ws_policy.disconnected()
+                    if self.ws_policy.critical() and hasattr(self.bot, 'safety'):
+                        await self.bot.safety.trip('ws_hard_offline')
                     await asyncio.sleep(delay)
-                    delay = min(30, delay * 2)
 
     async def status_loop(self):
         while True:
+            if hasattr(self.bot, 'process_watchdog'):
+                self.bot.process_watchdog.heartbeat('scanner')
+                self.bot.process_watchdog.heartbeat('ws')
             await asyncio.sleep(30)
             self.config.log.info("CONTINUOUS STATUS | connected=%s symbols=%d events=%d book_checks=%d entries=%d",
                             self.connected, len(self.symbols), self.events, self.book_checks, self.entries)

@@ -117,6 +117,7 @@ def test_legacy_state_upgrades_without_changing_account_or_size(tmp_path):
         old = state['strategy_positions']['BTC/USDT:USDT']
         state['strategy_positions']['BTC/USDT:USDT'] = {k: old[k] for k in ('side', 'entry', 'amount', 'tp')}
         state['strategy_positions']['BTC/USDT:USDT']['sl'] = 85
+        (path.parent / 'journal.wal').unlink(missing_ok=True)
         path.write_text(json.dumps(state))
         resumed = V2PaperHunter(path, market_data=data)
         balance = resumed.exchange.balance

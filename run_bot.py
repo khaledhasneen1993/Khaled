@@ -9,19 +9,22 @@ from binance_cascade_hunter_dynamic_v2_paper import V2PaperHunter
 from risk.config import load_config
 
 
-async def serve(bot):
-    task = asyncio.create_task(bot.start())
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, task.cancel)
+async def serve(bot, runner=None):
+    from infra.shutdown import GracefulShutdown
+    task = asyncio.create_task(runner if runner is not None else bot.start())
+    shutdown = GracefulShutdown(bot, task)
+    shutdown.install()
     try:
         await task
+    except asyncio.CancelledError:
+        if not shutdown.started: raise
     finally:
-        for sig in (signal.SIGTERM, signal.SIGINT):
-            loop.remove_signal_handler(sig)
+        shutdown.close()
 
 
 def main():
+    from infra.json_logging import configure
+    configure()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--state', help='State filename; live state is isolated by mode')
     args = parser.parse_args()

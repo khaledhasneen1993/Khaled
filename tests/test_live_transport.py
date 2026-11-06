@@ -164,9 +164,12 @@ def test_kill_latch_survives_restart(tmp_path):
     async def check():
         path = tmp_path / 'state.json'
         bot = V2PaperHunter(path, market_data=StreamData())
+        bot.safety.kill.mode = 'hard'
         bot.safety.kill.triggered = 'api_errors'
         bot.save()
         restored = V2PaperHunter(path, market_data=StreamData())
+        restored.safety.kill.mode = 'hard'
+        restored.restore()
         assert restored.safety.kill.triggered == 'api_errors'
         assert not restored.safety.ready
         assert not await restored.safety.allow_entry('BTC/USDT:USDT', 'buy', 100)
@@ -184,6 +187,7 @@ def test_unrealized_drawdown_triggers():
 def test_kill_closes_paper_positions_and_persists(tmp_path):
     async def check():
         bot = V2PaperHunter(tmp_path / 'state.json', market_data=StreamData())
+        bot.safety.kill.mode = 'hard'
         assert await bot.enter('BTC/USDT:USDT', 'buy', 100)
         await bot.safety.trip('manual_test_incident')
         assert not bot.positions and not bot.exchange.positions
@@ -272,9 +276,11 @@ async def runtime_with_transport(live, tmp_path):
     server = SimulatedBinance()
     live.client = httpx.AsyncClient(base_url='https://example.test', transport=httpx.MockTransport(server))
     bot = V2PaperHunter(tmp_path / 'lifecycle.json', market_data=StreamData())
+    bot.safety.kill.mode = 'hard'
     bot.execution_mode = 'testnet'
     bot.cfg = live.cfg
     bot.exchange = live
+    bot.safety.kill = KillSwitch(live.cfg['kill_switch'])
     bot.safety.cfg = live.cfg
     bot.safety.active = True
     bot.safety.ready = True
@@ -417,6 +423,7 @@ def test_technical_incident_persists_even_if_evidence_sampling_stops(tmp_path):
     from exchange.rollout import TestnetEvidence
     async def check():
         bot = V2PaperHunter(tmp_path / 'state.json', market_data=StreamData())
+        bot.safety.kill.mode = 'hard'
         cfg = bot.cfg
         cfg['rollout']['evidence_file'] = str(tmp_path / 'trial.json')
         bot.safety.evidence = TestnetEvidence(cfg)

@@ -15,8 +15,20 @@ class KillState:
 
 
 class KillSwitch:
-    def __init__(self, cfg: dict):
-        self.cfg = cfg
+    def __init__(self, cfg: dict, environment=None):
+        self.environment = environment
+        self.mode = 'hard' if environment is None else cfg.get('mode_per_environment', {}).get(environment, cfg.get('mode', 'hard'))
+        if environment == 'mainnet': self.mode = 'hard'
+        if environment == 'demo': self.mode = 'observe'
+        if self.mode not in ('observe', 'soft', 'hard'): raise ValueError('Invalid kill mode')
+        self.cfg = dict(cfg)
+        if environment == 'mainnet': self.cfg['daily_drawdown_action'] = 'flatten'
+        levels = cfg.get('thresholds', {}).get(self.mode, {}) if environment is not None else {}
+        for key, target in (('ws_offline_sec','ws_timeout_sec'), ('api_errors_per_min','api_error_limit'), ('spread_spike_mult','spread_spike_mult'), ('daily_dd_pct','daily_dd_limit_pct'), ('consecutive_losses','max_consecutive_losses')):
+            if key in levels: self.cfg[target] = levels[key]
+        self.cooldown_sec = levels.get('cooldown_sec', 600)
+        self.triggered_at = None
+        self.last_observed = None
         self.state = KillState(last_ws_heartbeat=time.time())
         self.triggered = None
         self.errors = deque()
@@ -64,7 +76,39 @@ class KillSwitch:
         self.day = datetime.now(timezone.utc).date().isoformat()
         self.day_start_equity = None
 
+    @property
+    def blocks_entries(self): return bool(self.triggered) and self.mode != 'observe'
+
     def check(self, state, market):
+        previous = self.triggered
+        if self.mode != 'hard': self.triggered = None
+        reason = self._check(state, market)
+        if self.mode == 'soft' or self.environment == 'mainnet':
+            reason = reason or self.entry_block_reason_raw()
+            self.triggered = reason
+        if self.mode == 'observe':
+            reason = reason or self.entry_block_reason_raw()
+            self.last_observed = reason
+            self.triggered = reason
+            self.entry_blocks.clear()
+            return None
+        if self.mode == 'soft':
+            if reason:
+                if previous is None: self.triggered_at = time.time()
+            elif previous and time.time() - (self.triggered_at or time.time()) < self.cooldown_sec:
+                self.triggered = previous
+            else:
+                self.triggered = None
+                self.triggered_at = None
+        return self.triggered
+
+    def entry_block_reason_raw(self):
+        return next((reason for reason, until in self.entry_blocks.items() if until > time.time()), None)
+
+    def check_health(self):
+        return time.time() - self.state.last_ws_heartbeat <= self.cfg['ws_timeout_sec'] and len(self.errors) < self.cfg['api_error_limit']
+
+    def _check(self, state, market):
         self._prune()
         equity = float(state.equity)
         self.roll_day(equity)
@@ -94,21 +138,24 @@ class KillSwitch:
         return self.triggered
 
     def entry_block_reason(self):
-        return next((reason for reason, until in self.entry_blocks.items() if until > time.time()), None)
+        return None if self.mode == 'observe' else self.entry_block_reason_raw()
 
     def should_flatten(self, reason):
+        if self.mode != 'hard': return False
+        if self.environment == 'mainnet': return bool(reason)
         if reason == 'daily_drawdown': return self.cfg['daily_drawdown_action'] == 'flatten'
         if reason in ('spread_spike', 'consecutive_losses'): return False
         return True
 
     def dump(self):
-        return {'state': asdict(self.state), 'triggered': self.triggered, 'day': self.day,
+        return {'triggered_at': self.triggered_at, 'mode': self.mode, 'state': asdict(self.state), 'triggered': self.triggered, 'day': self.day,
                 'day_start_equity': self.day_start_equity, 'errors': list(self.errors),
                 'entry_blocks': self.entry_blocks, 'handled_loss_streak': self.handled_loss_streak}
 
     def restore(self, data):
         self.state = KillState(**data['state'])
         self.triggered = data['triggered']
+        self.triggered_at = data.get('triggered_at') or (time.time() if self.triggered else None)
         self.day = data['day']
         self.day_start_equity = data.get('day_start_equity')
         self.errors = deque(data.get('errors', []))

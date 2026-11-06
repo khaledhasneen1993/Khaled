@@ -1,7 +1,7 @@
 {
   "name": "Khaled Cascade Hunter",
-  "version": "4.0.2",
-  "status": "approved_source_baseline",
+  "version": "4.1.0",
+  "status": "offline_validation_pending_soak",
   "python": ">=3.11",
   "primary_entrypoint": "run_demo.py",
   "initial_balance_usdt": 100,
@@ -148,7 +148,40 @@
     "book_depth": 20,
     "spread_block_sec": 90,
     "consecutive_loss_pause_sec": 600,
-    "daily_drawdown_action": "block_entries"
+    "daily_drawdown_action": "block_entries",
+    "mode": "observe",
+    "mode_per_environment": {
+      "paper": "observe",
+      "demo": "observe",
+      "testnet": "soft",
+      "mainnet": "hard"
+    },
+    "thresholds": {
+      "observe": {
+        "ws_offline_sec": 300,
+        "api_errors_per_min": 30,
+        "spread_spike_mult": 15.0,
+        "daily_dd_pct": 0.15,
+        "consecutive_losses": 10,
+        "cooldown_sec": 600
+      },
+      "soft": {
+        "ws_offline_sec": 120,
+        "api_errors_per_min": 15,
+        "spread_spike_mult": 10.0,
+        "daily_dd_pct": 0.1,
+        "consecutive_losses": 6,
+        "cooldown_sec": 600
+      },
+      "hard": {
+        "ws_offline_sec": 60,
+        "api_errors_per_min": 10,
+        "spread_spike_mult": 8.0,
+        "daily_dd_pct": 0.05,
+        "consecutive_losses": 4,
+        "cooldown_sec": 600
+      }
+    }
   },
   "exposure": {
     "basis": "margin",
@@ -245,10 +278,42 @@
   "demo": {
     "state_filename": "state.json",
     "preflight_symbol": "BTCUSDT",
-    "huma_entry_order_id": 247831476,
-    "huma_close_order_id": 247831491,
+    "huma_entry_order_id": null,
+    "huma_close_order_id": null,
     "huma_symbol": "HUMAUSDT",
-    "huma_confirmed_realized_pnl": "-1.06663200"
+    "huma_confirmed_realized_pnl": null
   },
-  "same_symbol_loss_cooldown": 600
+  "same_symbol_loss_cooldown": 600,
+  "process": {
+    "watchdog_check_interval_sec": 10,
+    "component_timeout_sec": {
+      "ws": 120,
+      "scanner": 120,
+      "order_manager": 120,
+      "reconciler": 300
+    },
+    "max_memory_gb": 1.5,
+    "max_fds": 10000
+  },
+  "ws": {
+    "hard_offline_sec": 300,
+    "ping_interval_sec": 20,
+    "ping_timeout_sec": 10,
+    "reconnect_max_delay_sec": 60
+  },
+  "circuit_breaker": {
+    "failure_threshold": 30,
+    "cooldown_sec": 30,
+    "request_budget_sec": 30
+  },
+  "persistence": {
+    "wal_enabled": true,
+    "state_save_interval_sec": 10,
+    "startup_reconcile_required": true
+  },
+  "health": {
+    "enabled": true,
+    "port": 8080,
+    "host": "127.0.0.1"
+  }
 }

@@ -13,6 +13,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from journal.wal import WriteAheadLog
 from infra.journal import atomic_json, OperationalJournal
 from infra.rate_limit import TokenBucket
 from tools.demo_preflight import demo_config, preflight, ReadOnlyDemo
@@ -70,7 +71,7 @@ def main():
                 backup = root / ('state.before-policy-' + preview['preview_sha256'] + '.json')
                 if not backup.exists(): atomic_json(backup, json.loads(original))
                 if state.read_bytes() != original: raise ValueError('State changed during upgrade')
-                atomic_json(state, updated)
+                WriteAheadLog(state.parent / 'journal.wal').snapshot(state, updated)
                 OperationalJournal(root / 'journal').log('policy_upgrade', report={
                     'version': cfg['version'], 'preview_sha256': preview['preview_sha256']})
                 print('Policy upgraded locally. Trades, risk counters, kill latch and session guard retained. Trading remains stopped.')
