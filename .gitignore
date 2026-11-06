@@ -17,3 +17,5 @@ journal/*.log
 
 # The template is public; actual connection settings stay local.
 !.env.example
+
+.venv-paper-dashboard/

@@ -163,6 +163,19 @@ python -u tools/supervise_demo.py --dashboard
 
 تبقى `run_demo.py` و`run_bot.py` و`run_paper_live.py` وواجهات Paper والنشر متاحة. `run_bot.py` يتبع baseline ويبدأ Paper افتراضيًا؛ مسار التداول التجريبي المعتمد هو`run_demo.py`.
 
+## محاكاة Paper مع Final على اللوحة المحلية
+
+للمقارنة برصيد افتراضي100USDT لكل بوت، من Ubuntu داخل Termux، أوقف لوحة Paper القديمة ثم:
+
+```bash
+git pull --ff-only
+bash run_paper_dashboard.sh --fresh
+```
+
+افتح `http://127.0.0.1:8787`. يستمر الأمر السابق في جلسة تيرمكس ويشغّل Final وKhaled تلقائيًا. أول مرة يجلب مصدر Final ويثبت المكتبات. للاستئناف بعد Ctrl+C: `bash run_paper_dashboard.sh` دون `--fresh`. كل استعمال لـ`--fresh` ينشئ جلسة جديدة ويحفظ القديمة.
+
+هذا مسار Paper مفروض ببيانات السوق العامة، مستقل عن حساب Demo ومفاتيحه وحالته، ولا يرسل Telegram. يعرض السياسة الحالية وحالة الملاحقة وأسباب الإغلاق والرسوم، مع تصدير CSV وJSON. [التعليمات الكاملة](paper_dashboard/README-AR.md).
+
 ## أدوات الصيانة
 
 | الأداة | الاستخدام |
