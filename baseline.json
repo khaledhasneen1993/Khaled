@@ -1,6 +1,6 @@
 {
   "name": "Khaled Cascade Hunter",
-  "version": "4.0.0",
+  "version": "4.0.1",
   "status": "approved_source_baseline",
   "python": ">=3.11",
   "primary_entrypoint": "run_demo.py",
@@ -17,7 +17,6 @@
   "universe_refresh_sec": 600,
   "min_quote_volume_usdt": 15000000,
   "cooldown_sec": 8,
-  "exit_check_sec": 8,
   "fee_rate": 0.0005,
   "tp_sl": {
     "atr_stop_mult": 1.5,

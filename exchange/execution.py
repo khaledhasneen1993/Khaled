@@ -9,7 +9,6 @@ import math
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 
-from infra.journal import atomic_json
 from paper_account import make_position
 from risk.slippage import entry_slippage_bps, exit_slippage_bps
 from .orders import ExchangeError, ExecutionUnknown, FillPriceUnavailable, OrderRejected, safe_create_order

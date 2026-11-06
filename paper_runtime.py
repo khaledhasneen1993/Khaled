@@ -18,7 +18,6 @@ import math
 import sys
 from infra.supervisor import SafetySupervisor
 from risk.liq_math import direction
-from risk.slippage import exit_slippage_bps
 
 
 class DynamicPaperExchange(PaperExchange):

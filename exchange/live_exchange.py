@@ -20,11 +20,10 @@ from urllib.parse import urlencode
 
 import httpx
 
-from paper_account import PaperExchange, make_position
+from paper_account import PaperExchange
 from infra.journal import OperationalJournal, atomic_json
 from infra.http_logging import secure_http_logging
 from infra.rate_limit import TokenBucket, with_backoff
-from risk.slippage import entry_slippage_bps, exit_slippage_bps
 from .orders import ExchangeError, ExecutionUnknown, safe_create_order
 from .execution import DurableExecution
 from .protection_state import NativeExitState, ProtectionGuardError

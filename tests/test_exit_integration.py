@@ -70,7 +70,7 @@ def test_atr_outage_does_not_reject_signals(tmp_path):
         bot = V2PaperHunter(tmp_path / 'state.json', market_data=data)
         for symbol, side in (('BTC/USDT:USDT', 'buy'), ('ETH/USDT:USDT', 'sell'), ('SOL/USDT:USDT', 'buy')):
             assert await bot.enter(symbol, side, 100)
-            assert bot.positions[symbol]['atr_source'] == 'fallback'
+            assert bot.positions[symbol]['atr_source'] == 'not_used'
             assert bot.positions[symbol]['amount'] > 0
         assert len(bot.positions) == 3
     asyncio.run(check())

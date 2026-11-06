@@ -18,6 +18,8 @@ def load_config():
                 and 0 < cfg['exit']['trail_distance_pct'] < cfg['exit']['trail_arm_pct'] < 1
                 and 0 < cfg['tp_sl']['max_equity_risk_pct'] <= .03):
             raise ValueError('Invalid price-stop risk policy')
+        if cfg['exit']['allow_partial_close'] is not False or cfg['exit']['trail_enabled'] is not True:
+            raise ValueError('Current policy requires full exits and enabled trailing')
         if cfg['kill_switch']['daily_drawdown_action'] not in ('block_entries', 'flatten'):
             raise ValueError('Daily drawdown action must be explicit')
     if _mode.get() is not None: cfg['exchange']['mode'] = _mode.get()

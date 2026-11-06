@@ -166,7 +166,10 @@ class CascadeHunter:
                     await self.safety.event('entry_blocked', reason='expected_slippage', symbol=symbol,
                         report={'expected_bps': expected_bps if expected_bps != float('inf') else None})
                     return False
-            atr, atr_source = await self.exit_atr(symbol, price)
+            if self.cfg['exit']['policy'] == 'hard_stop_trailing':
+                atr, atr_source = None, 'not_used'
+            else:
+                atr, atr_source = await self.exit_atr(symbol, price)
             await self.set_leverage(symbol)
             fill = await self.exchange.create_order(
                 symbol, "market", side, amount,
@@ -192,7 +195,10 @@ class CascadeHunter:
                     price = ticker["last"]
                 from paper_account import Position, make_position
                 cfg = getattr(self, "cfg", None) or load_config()
-                atr, source = await self.exit_atr(symbol, price)
+                if cfg['exit']['policy'] == 'hard_stop_trailing':
+                    atr, source = pos.get('atr_at_entry'), pos.get('atr_source', 'not_used')
+                else:
+                    atr, source = await self.exit_atr(symbol, price)
                 if "stop_initial" not in pos:
                     if getattr(self, 'execution_mode', 'paper') != 'paper':
                         raise RuntimeError('Live legacy position requires explicit execution recovery')
@@ -214,13 +220,16 @@ class CascadeHunter:
                     pos = self.positions[symbol] = Position(pos)
                 sm = 1 if pos["side"] == "buy" else -1
                 previous_stop = pos.stop
-                fee = max(self.exchange.fee_rate, pos.get("entry_fee", 0.) / (pos["entry"] * pos["amount"]))
-                exit_cfg = {**cfg["exit"], "be_offset_pct": max(
-                    cfg["exit"]["be_offset_pct"], 2 * fee / (1 - sm * fee))}
+                exit_cfg = cfg['exit']
+                if exit_cfg['policy'] != 'hard_stop_trailing':
+                    fee = max(self.exchange.fee_rate, pos.get("entry_fee", 0.) / (pos["entry"] * pos["amount"]))
+                    exit_cfg = {**exit_cfg, 'be_offset_pct': max(
+                        exit_cfg['be_offset_pct'], 2 * fee / (1 - sm * fee))}
                 update_dynamic_stop(pos, SimpleNamespace(price=price, atr=atr), exit_cfg)
-                be_stop = pos.entry * (1 + sm * exit_cfg["be_offset_pct"])
-                if sm * (pos.stop - previous_stop) > 0 and sm * (pos.stop - be_stop) > 0:
-                    pos["trail_moved"] = True
+                if exit_cfg['policy'] != 'hard_stop_trailing':
+                    be_stop = pos.entry * (1 + sm * exit_cfg['be_offset_pct'])
+                    if sm * (pos.stop - previous_stop) > 0 and sm * (pos.stop - be_stop) > 0:
+                        pos['trail_moved'] = True
                 hit_tp = pos.get('tp') is not None and ((pos["side"] == "buy" and price >= pos["tp"]) or
                          (pos["side"] == "sell" and price <= pos["tp"]))
                 hit_sl = (pos["side"] == "buy" and price <= pos["sl"]) or \

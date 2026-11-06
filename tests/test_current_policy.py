@@ -417,3 +417,22 @@ def test_demo_size_uses_actual_account_equity_not_paper_balance(tmp_path,monkeyp
         assert pos['amount']*(.004+.0005*(.05+.046))<=float(equity)*.025
         await bot.exchange.close()
     run(check())
+
+
+def test_current_policy_does_not_fetch_unused_atr_for_entry_or_exit(tmp_path):
+    async def check():
+        data=StreamData()
+        data.fetch_ohlcv=AsyncMock(side_effect=AssertionError('ATR must not delay current execution'))
+        bot=V2PaperHunter(tmp_path/'state.json',market_data=data)
+        assert await bot.enter('BTC/USDT:USDT','buy',100)
+        pos=bot.positions['BTC/USDT:USDT']
+        assert pos['atr_at_entry'] is None and pos['atr_source']=='not_used'
+        data.price=101.5
+        await bot.manage_exits()
+        assert pos['trailing_armed']
+        data.price=pos['sl']
+        await bot.manage_exits()
+        assert not bot.positions
+        assert bot.exchange.trades[-1]['exit_reason']=='TRAILING_SL'
+        data.fetch_ohlcv.assert_not_awaited()
+    run(check())
