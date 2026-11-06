@@ -43,13 +43,32 @@ class Position(dict):
 def make_position(side, entry, amount, leverage, atr, cfg, equity, fee_rate,
                   opened_at=None, signal_id=None, atr_source="candles"):
     sm = 1 if side == "buy" else -1
+    from risk.trading_policy import fixed_exits
+    if fixed_exits(cfg):
+        from risk.liq_math import validate_stop_against_liq
+        pct = cfg['exit']['hard_stop_pct']
+        stop = entry * (1 - sm * pct)
+        loss = amount * (entry * pct + fee_rate * (entry + stop))
+        if loss > equity * cfg['tp_sl']['max_equity_risk_pct'] + math.ulp(equity) * 8:
+            raise ValueError('Hard stop exceeds equity risk budget')
+        if not validate_stop_against_liq(side, entry, stop, leverage, cfg['tp_sl']['mmr'],
+                cfg['tp_sl']['liq_safety_margin'], cfg['tp_sl'].get('maintenance_amount', 0), amount):
+            raise ValueError('Hard stop is beyond liquidation safety boundary')
+        return Position(side=side, entry=entry, amount=amount, leverage=leverage,
+            tp=None, sl=stop, stop_initial=stop, stop_pct=pct, stop_pct_initial=pct,
+            tp_pct=None, rr=None, stop_capped=False, risk_capped=False,
+            exit_policy='hard_stop_trailing', trailing_armed=False, trailing_extreme=entry,
+            trail_arm_pct=cfg['exit']['trail_arm_pct'], trail_distance_pct=cfg['exit']['trail_distance_pct'],
+            breakeven_armed=False, trail_moved=False, atr_at_entry=atr, atr_source=atr_source,
+            opened_at=datetime.now(timezone.utc).timestamp() if opened_at is None else opened_at,
+            signal_id=signal_id or uuid4().hex, entry_fee=entry * amount * fee_rate, equity_at_entry=equity)
     # Loss at stop including entry + exit fees:
     # amount * (distance + fee * (2*entry - sm*distance)).
     budget = equity * cfg["tp_sl"]["max_equity_risk_pct"]
     distance_cap = (budget / amount - 2 * entry * fee_rate) / (1 - sm * fee_rate)
     levels = compute_tp_sl(side, entry, atr, leverage,
                            {**cfg["tp_sl"], "max_stop_distance": distance_cap})
-    return Position(side=side, entry=entry, amount=amount, tp=levels["tp"], sl=levels["stop"],
+    return Position(exit_policy="atr", side=side, entry=entry, amount=amount, tp=levels["tp"], sl=levels["stop"],
                     stop_initial=levels["stop"], stop_pct=levels["stop_pct"],
                     stop_pct_initial=levels["stop_pct"], tp_pct=levels["tp_pct"], rr=levels["rr"],
                     stop_capped=levels["stop_capped"], risk_capped=levels["risk_capped"],

@@ -57,7 +57,7 @@ def test_reached_stop_uses_normal_exit_path_not_protection_failure(tmp_path, mon
         assert not server.position_rows() and not bot.positions
         assert bot.safety.kill.triggered is None
         result = next(t['exit_detail'] for t in bot.exchange.trades if t.get('exit_detail'))
-        assert result['exit_reason'] == 'stop_loss'
+        assert result['exit_reason'] == 'HARD_SL'
         assert D(result['net_pnl_exact']) == server.wallet - server.start_wallet
         await bot.exchange.close()
     run(check())
@@ -88,7 +88,7 @@ def test_actual_liquidation_buffer_breach_still_latches(tmp_path, monkeypatch):
 def test_native_fill_with_stale_position_snapshot_is_adopted_without_second_close(tmp_path, monkeypatch, role):
     async def check():
         server = FuturesSimulator()
-        bot = await production_bot(tmp_path, monkeypatch, server)
+        bot = await production_bot(tmp_path, monkeypatch, server, legacy=(role == 'tp'))
         live, raw, symbol = bot.exchange, 'AIOUSDT', bot.exchange.symbol('AIOUSDT')
         assert await bot.enter(symbol, 'buy', .05)
         stale = copy.deepcopy(server.position_rows())
@@ -112,7 +112,7 @@ def test_native_fill_with_stale_position_snapshot_is_adopted_without_second_clos
         record = live.executions[live.execution_key(symbol, child['orderId'])]
         assert record['native_exit'] and record['options']['native_parent_id'] == protection['orderId']
         result = next(t['exit_detail'] for t in live.trades if t.get('exit_detail'))
-        assert result['exit_reason'] == ('stop_loss' if role == 'sl' else 'take_profit')
+        assert result['exit_reason'] == ('HARD_SL' if role == 'sl' else 'take_profit')
         assert D(result['net_pnl_exact']) == server.wallet - server.start_wallet
         await live.close()
     run(check())
@@ -167,7 +167,7 @@ def test_terminal_partial_native_exit_closes_only_proven_remainder(tmp_path, mon
         assert len(posted) == 2 and D(posted[-1]['quantity']) == remaining
         assert D(child['executedQty']) + remaining == original
         result = next(t['exit_detail'] for t in live.trades if t.get('exit_detail'))
-        assert result['exit_reason'] == 'stop_loss'
+        assert result['exit_reason'] == 'HARD_SL'
         assert D(result['net_pnl_exact']) == server.wallet - server.start_wallet
         await live.close()
     run(check())
@@ -195,7 +195,7 @@ def test_unknown_native_remainder_blocks_fallback_post_and_keeps_latch(tmp_path,
         with patch('asyncio.sleep', new_callable=AsyncMock): assert not await bot.safety.reconcile_once()
         assert bot.safety.kill.triggered and server.position_rows()
         assert sum(m == 'POST' and p == '/fapi/v1/order' for m,p,_ in server.requests) == 1
-        assert server.algos[bot.positions[symbol]['protection']['tp']['orderId']]['algoStatus'] == 'NEW'
+        assert symbol in bot.positions and bot.positions[symbol]['protection']['sl'] == sl
         await live.close()
     run(check())
 
@@ -273,7 +273,7 @@ def test_native_fill_between_account_and_open_order_reads_is_normal_exit(tmp_pat
         assert await bot.safety.reconcile_once()
         assert fired and not bot.positions and not live.positions
         assert bot.safety.kill.triggered is None and len(server.orders) == 2
-        assert next(t['exit_detail']['exit_reason'] for t in live.trades if t.get('exit_detail')) == 'stop_loss'
+        assert next(t['exit_detail']['exit_reason'] for t in live.trades if t.get('exit_detail')) == 'HARD_SL'
         await live.close()
     run(check())
 
@@ -321,7 +321,7 @@ def test_native_price_pending_restart_keeps_origin_and_no_duplicate_exit(tmp_pat
         assert await bot.adopt_native_close(symbol)
         assert len(server.orders) == 2 and bot.safety.kill.triggered
         result = next(t['exit_detail'] for t in bot.exchange.trades if t.get('exit_detail'))
-        assert result['exit_reason'] == 'stop_loss'
+        assert result['exit_reason'] == 'HARD_SL'
         assert D(result['net_pnl_exact']) == server.wallet - server.start_wallet
         await bot.exchange.close()
     run(check())

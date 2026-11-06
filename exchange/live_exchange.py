@@ -332,11 +332,21 @@ class LiveExchange(DurableExecution, NativeExitState, PaperExchange):
         return row['brackets']
 
     async def select_leverage(self, symbol, margin, price, confirm=True):
-        from .leverage import choose_leverage
+        from .leverage import choose_leverage, bracket_for
+        from risk.trading_policy import entry_amount
         brackets = await self.leverage_brackets(symbol)
+        fixed = self.cfg['exchange'].get('leverage_policy') == 'fixed'
+        equity = margin / self.cfg['margin_fraction_per_position']
+        round_amount = lambda q: float(self.amount_to_precision(symbol, q))
         ceiling = None
         while True:
-            choice = choose_leverage(brackets, margin, price, lambda q: float(self.amount_to_precision(symbol, q)), ceiling)
+            choice = {'leverage': self.cfg['leverage'], 'confirmed': False} if fixed else choose_leverage(
+                brackets, margin, price, round_amount, ceiling)
+            choice['amount'] = entry_amount(equity, price, choice['leverage'], self.cfg, self.fee_rate, round_amount)
+            choice.update(notional=choice['amount'] * price, margin=choice['amount'] * price / choice['leverage'])
+            choice['bracket'] = bracket_for(brackets, choice['notional'])
+            if choice['leverage'] > int(choice['bracket']['initialLeverage']):
+                raise OrderValidationError('configured_leverage_unavailable')
             market = self.market(symbol)
             choice['quantity_limits'] = dict(market['limits']['amount'])
             try:
@@ -356,15 +366,22 @@ class LiveExchange(DurableExecution, NativeExitState, PaperExchange):
             except ExchangeError as error:
                 # Definitive leverage/account limits only. Transport uncertainty
                 # never authorizes an order or a silent guessed leverage.
-                if error.code not in self.cfg['exchange']['leverage_rejection_codes'] or choice['leverage'] <= 1: raise
+                if fixed or error.code not in self.cfg['exchange']['leverage_rejection_codes'] or choice['leverage'] <= 1: raise
                 ceiling = choice['leverage'] - 1
                 continue
             if choice['notional'] > maximum:
-                if choice['leverage'] <= 1: raise ValueError('No accepted leverage/notional combination')
+                if fixed or choice['leverage'] <= 1: raise ValueError('No accepted leverage/notional combination')
                 ceiling = choice['leverage'] - 1
                 continue
             choice['confirmed'] = True
             break
+        choice.update(leverage_policy=self.cfg['exchange']['leverage_policy'], target_margin=margin,
+                      max_equity_risk_pct=self.cfg['tp_sl']['max_equity_risk_pct'])
+        if confirm and choice.get('confirmed'):
+            self.journal.log('entry_sizing', symbol=symbol, stage='confirmed_sizing',
+                amount=choice['amount'], leverage=choice['leverage'], report={
+                    'equity': equity, 'target_margin': margin, 'actual_margin': choice['margin'],
+                    'notional': choice['notional'], 'risk_budget': equity * self.cfg['tp_sl']['max_equity_risk_pct']})
         self.selected_leverage[symbol] = choice
         return choice
 
@@ -425,6 +442,7 @@ class LiveExchange(DurableExecution, NativeExitState, PaperExchange):
         """Create-confirm-before-cancel: no unsupported atomic STOP amendment."""
         side = 'sell' if pos['side'] == 'buy' else 'buy'
         for name, kind, target in (('sl', 'STOP_MARKET', pos['sl']), ('tp', 'TAKE_PROFIT_MARKET', pos['tp'])):
+            if target is None: continue
             self.execution_stage = 'protection_' + name
             old = pos.get('protection', {}).get(name)
             # Stop rounds toward entry; TP rounds away, preserving planned RR.
@@ -518,9 +536,9 @@ class LiveExchange(DurableExecution, NativeExitState, PaperExchange):
     def validate_initial_protection(self, symbol, pos):
         entry = Decimal(str(pos['entry']))
         stop = Decimal(self._price(symbol, pos['sl'], pos['side'] == 'buy'))
-        target = Decimal(self._price(symbol, pos['tp'], pos['side'] == 'buy'))
+        target = Decimal(self._price(symbol, pos['tp'], pos['side'] == 'buy')) if pos.get('tp') is not None else None
         sm = 1 if pos['side'] == 'buy' else -1
-        if stop <= 0 or target <= 0 or sm * (entry - stop) <= 0 or sm * (target - entry) <= 0:
+        if stop <= 0 or sm * (entry - stop) <= 0 or target is not None and (target <= 0 or sm * (target - entry) <= 0):
             raise OrderValidationError('protection_unavailable_at_price_tick')
 
     def constrain_actual_liquidation(self, symbol, pos, actual):
@@ -555,6 +573,7 @@ class LiveExchange(DurableExecution, NativeExitState, PaperExchange):
         tick = Decimal(self.market(symbol)['tick'])
         stop = Decimal(self._price(symbol, pos['sl'], sm == 1))
         if sm * (stop - boundary) <= 0:
+            if pos.get('exit_policy') == 'hard_stop_trailing': fail('hard_stop_liquidation_conflict', **facts)
             rounding = ROUND_FLOOR if sm == 1 else ROUND_CEILING
             stop = ((boundary / tick).to_integral_value(rounding=rounding) + sm) * tick
             if trigger is None: fail('trigger_price_unavailable', **facts)

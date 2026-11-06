@@ -29,12 +29,14 @@ class LiveTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fill['entry_reason'],'CASCADE_MOVE_VOLUME_ORDERBOOK')
         self.assertAlmostEqual(fill['entry_signal']['imbalance'],.8)
         self.assertEqual(fill['stop_loss_price'],self.bot.positions['BTC/USDT:USDT']['stop_initial'])
-        self.assertGreater(fill['stop_loss_price'],100)
+        self.assertAlmostEqual(fill['stop_loss_price'],102 * .92)
         self.data.price=105
         await self.bot.manage_exits()
+        self.data.price=104
+        await self.bot.manage_exits()
         closed=self.bot.exchange.trades[-1]
-        self.assertEqual(closed['exit_reason'],'TP')
-        self.assertEqual(closed['trigger_price'],105)
+        self.assertEqual(closed['exit_reason'],'TRAILING_SL')
+        self.assertEqual(closed['trigger_price'],104)
         restored=V2PaperHunter(self.path,fee_rate=0,market_data=self.data)
         self.assertEqual(restored.exchange.trades,self.bot.exchange.trades)
 
@@ -42,7 +44,7 @@ class LiveTests(unittest.IsolatedAsyncioTestCase):
         await self.bot.enter('ETH/USDT:USDT','sell',100)
         self.data.price=116
         await self.bot.manage_exits()
-        self.assertEqual(self.bot.exchange.trades[-1]['exit_reason'],'SL')
+        self.assertEqual(self.bot.exchange.trades[-1]['exit_reason'],'HARD_SL')
         self.assertEqual(self.bot.exchange.trades[-1]['trigger_price'],116)
 
     async def test_snapshot_is_copy_and_never_contains_token(self):

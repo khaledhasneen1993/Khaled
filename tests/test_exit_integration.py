@@ -18,13 +18,14 @@ def test_planned_loss_includes_both_fees():
         for entry in (.001, 100, 100000):
             for equity in (50, 100, 10000):
                 for atr_pct in (0, .004, .03):
-                    amount = equity * cfg['margin_fraction_per_position'] * cfg['leverage'] / entry
+                    from risk.trading_policy import entry_amount
+                    amount = entry_amount(equity, entry, cfg['leverage'], cfg, cfg['fee_rate'])
                     pos = make_position(side, entry, amount, cfg['leverage'], entry * atr_pct,
                                         cfg, equity, cfg['fee_rate'])
                     planned_loss = abs(entry - pos.stop) * amount + pos['entry_fee'] + pos.stop * amount * cfg['fee_rate']
                     assert planned_loss <= equity * cfg['tp_sl']['max_equity_risk_pct'] + 1e-9
-                    assert pos['risk_capped'] == (atr_pct == .03)
-                    assert pos['rr'] >= cfg['tp_sl']['min_rr']
+                    assert pos['stop_pct_initial'] == .08
+                    assert pos['tp'] is None
 
 
 def test_armed_state_and_initial_stop_survive_resume(tmp_path):
@@ -35,7 +36,7 @@ def test_armed_state_and_initial_stop_survive_resume(tmp_path):
         original = copy.deepcopy(bot.positions['BTC/USDT:USDT'])
         # A still-open position arms BE and tightens trailing, then resumes.
         pos = bot.positions['BTC/USDT:USDT']
-        update_dynamic_stop(pos, SimpleNamespace(price=100.7, atr=.3), bot.cfg['exit'])
+        update_dynamic_stop(pos, SimpleNamespace(price=101.5, atr=.3), bot.cfg['exit'])
         bot.save()
         restored = V2PaperHunter(bot.state_path, market_data=data)
         assert restored.positions == bot.positions
@@ -54,7 +55,7 @@ def test_armed_state_and_initial_stop_survive_resume(tmp_path):
         assert record['stop_initial'] == original['stop_initial']
         assert record['stop_final'] > record['stop_initial']
         assert record['breakeven_armed']
-        assert record['exit_reason'] == 'stop_loss'
+        assert record['exit_reason'] == 'TRAILING_SL'
         again = V2PaperHunter(bot.state_path, market_data=data)
         assert again.exchange.trades == restored.exchange.trades
     asyncio.run(check())
@@ -78,13 +79,13 @@ def test_atr_outage_does_not_reject_signals(tmp_path):
 def test_levels_anchor_to_fill_not_signal(tmp_path):
     async def check():
         data = StreamData()
-        data.price = 102
+        data.price = 100.2
         bot = V2PaperHunter(tmp_path / 'state.json', market_data=data)
-        assert await bot.enter('BTC/USDT:USDT', 'buy', 100)
+        assert await bot.enter('BTC/USDT:USDT', 'buy', 100.2)
         pos = bot.positions['BTC/USDT:USDT']
-        assert pos['entry'] == bot.exchange.positions['BTC/USDT:USDT']['entry'] == 102
-        assert pos['sl'] < 102 < pos['tp']
-        assert abs(pos['sl'] - 102) * pos['amount'] + pos['entry_fee'] + pos['sl'] * pos['amount'] * bot.exchange.fee_rate <= 3 + 1e-9
+        assert pos['entry'] == bot.exchange.positions['BTC/USDT:USDT']['entry'] == 100.2
+        assert pos['sl'] == pytest.approx(100.2 * .92) and pos['tp'] is None
+        assert abs(pos['sl'] - 100.2) * pos['amount'] + pos['entry_fee'] + pos['sl'] * pos['amount'] * bot.exchange.fee_rate <= 3 + 1e-9
     asyncio.run(check())
 
 
@@ -93,10 +94,10 @@ def test_gap_uses_actual_exit_fill_and_reports_excess_loss(tmp_path):
         data = StreamData()
         bot = V2PaperHunter(tmp_path / 'state.json', market_data=data)
         assert await bot.enter('BTC/USDT:USDT', 'buy', 100)
-        data.price = 96  # A gap can exceed the planned stop budget.
+        data.price = 88  # A gap can exceed the planned stop budget.
         await bot.manage_exits()
         record = bot.exchange.trades[-1]['exit_detail']
-        assert record['exit_price'] == 96
+        assert record['exit_price'] == 88
         assert record['net_pnl_usdt'] == pytest.approx(bot.exchange.balance - 100)
         assert record['net_pnl_usdt'] < -3
     asyncio.run(check())
@@ -123,7 +124,7 @@ def test_legacy_state_upgrades_without_changing_account_or_size(tmp_path):
         await resumed.manage_exits()
         pos = resumed.positions['BTC/USDT:USDT']
         assert pos['legacy_migrated']
-        assert pos['sl'] > 98.4
+        assert pos['sl'] == 92
         assert pos['amount'] == amount
         assert resumed.exchange.balance == balance
     asyncio.run(check())

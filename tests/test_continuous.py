@@ -144,6 +144,8 @@ class ContinuousTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.scanner.signal(BTC))
         self.data.price = 105
         await self.bot.manage_exits()
+        self.data.price = 104
+        await self.bot.manage_exits()
         self.assertNotIn(BTC, self.bot.positions)
 
     async def test_failed_book_check_backs_off_without_entry(self):

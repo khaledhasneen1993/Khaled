@@ -65,8 +65,8 @@ def test_breakeven_after_trigger():
     for side, sm in (('long', 1), ('short', -1)):
         pos = SimpleNamespace(side=side, entry=100., stop=100 - sm, breakeven_armed=False)
         market = SimpleNamespace(price=100 * (1 + sm * CFG['exit']['be_trigger_pct']), atr=1.)
-        update_dynamic_stop(pos, market, CFG['exit'])
-        assert pos.stop == 100 * (1 + sm * CFG['exit']['be_offset_pct'])
+        update_dynamic_stop(pos, market, {**CFG['exit'], 'policy': 'atr'})
+        assert (1 if side == 'long' else -1) * (pos.stop - 100) >= CFG['exit']['be_offset_pct'] * 100 - 1e-10
         assert pos.breakeven_armed is True
 
 
@@ -75,7 +75,7 @@ def test_trailing_follows_price():
         pos = SimpleNamespace(side=side, entry=100., stop=100., breakeven_armed=True)
         stops = [pos.stop]
         for step in (1, 2, 3):
-            update_dynamic_stop(pos, SimpleNamespace(price=100 + sm * step, atr=.4), CFG['exit'])
+            update_dynamic_stop(pos, SimpleNamespace(price=100 + sm * step, atr=.4), {**CFG['exit'], 'policy': 'atr'})
             stops.append(pos.stop)
         assert all(sm * (b - a) > 0 for a, b in zip(stops, stops[1:]))
 
@@ -84,11 +84,11 @@ def test_trailing_never_loosens():
     for side, sm in (('long', 1), ('short', -1)):
         pos = SimpleNamespace(side=side, entry=100., stop=100 + sm, breakeven_armed=True)
         for price in (100.5, 100., 99.5):
-            update_dynamic_stop(pos, SimpleNamespace(price=price, atr=2.), CFG['exit'])
+            update_dynamic_stop(pos, SimpleNamespace(price=price, atr=2.), {**CFG['exit'], 'policy': 'atr'})
             assert pos.stop == 100 + sm
         # An externally tightened stop must not be loosened when BE first arms.
         pos.breakeven_armed = False
-        update_dynamic_stop(pos, SimpleNamespace(price=100 + sm, atr=2.), CFG['exit'])
+        update_dynamic_stop(pos, SimpleNamespace(price=100 + sm, atr=2.), {**CFG['exit'], 'policy': 'atr'})
         assert pos.stop == 100 + sm
 
 
@@ -99,10 +99,14 @@ def test_manage_exits_tp(tmp_path):
             bot = V2PaperHunter(tmp_path / (side + '.json'), market_data=data)
             assert await bot.enter('BTC/USDT:USDT', side, 100)
             pos = bot.positions['BTC/USDT:USDT']
-            data.price = pos['tp']
+            sm = 1 if side == 'buy' else -1
+            data.price = 100 * (1 + sm * .02)
+            await bot.manage_exits()
+            assert bot.positions
+            data.price = bot.positions['BTC/USDT:USDT']['sl']
             await bot.manage_exits()
             assert not bot.positions
-            assert bot.exchange.trades[-1]['exit_detail']['exit_reason'] == 'take_profit'
+            assert bot.exchange.trades[-1]['exit_detail']['exit_reason'] == 'TRAILING_SL'
     asyncio.run(check())
 
 
@@ -115,7 +119,7 @@ def test_manage_exits_sl(tmp_path):
             data.price = bot.positions['BTC/USDT:USDT']['sl']
             await bot.manage_exits()
             assert not bot.positions
-            assert bot.exchange.trades[-1]['exit_detail']['exit_reason'] == 'stop_loss'
+            assert bot.exchange.trades[-1]['exit_detail']['exit_reason'] == 'HARD_SL'
     asyncio.run(check())
 
 

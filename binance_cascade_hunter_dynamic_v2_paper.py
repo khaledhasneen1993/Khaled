@@ -36,6 +36,13 @@ class V2PaperHunter(DynamicPaperHunter):
         return await v2.CascadeHunter.exit_watcher(self)
 
 
+def settings_for_config(cfg):
+    """Inspect Demo settings without constructing a client or restoring state."""
+    bot = V2PaperHunter.__new__(V2PaperHunter)
+    bot.cfg, bot.strategy, bot.execution_mode = cfg, v2, 'testnet'
+    return bot.settings()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--state", default="paper_state_dynamic_v2.json")
@@ -45,7 +52,7 @@ def main():
     if not math.isfinite(args.fee_rate) or not 0 <= args.fee_rate < 0.01:
         parser.error("--fee-rate must be finite and in [0, 0.01)")
     bot = V2PaperHunter(args.state, args.fee_rate, args.reset)
-    v2.log.info("KHALED %s | equity margin=10%% | leverage=%sx | ATR TP/SL | max_positions=3", bot.execution_mode, bot.settings()["LEVERAGE"])
+    v2.log.info("KHALED %s | equity margin ceiling=10%% | leverage=%sx | hard stop 8%%, trail 1.5%%/0.6%% | max_positions=4", bot.execution_mode, bot.settings()["LEVERAGE"])
     if bot.execution_mode == "paper":
         v2.log.warning("Paper mode does not simulate liquidation or actual funding fills")
     try:

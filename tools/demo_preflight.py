@@ -51,6 +51,8 @@ async def preflight(exchange, symbol, websocket=True):
                 ws_ok = message.get('data', {}).get('e') == 'kline'
     state_path = exchange.intent_path.parent / exchange.cfg['demo']['state_filename']
     local_state = json.loads(state_path.read_text()) if state_path.exists() else {}
+    from binance_cascade_hunter_dynamic_v2_paper import settings_for_config
+    policy_matches = not state_path.exists() or local_state.get('settings') == settings_for_config(exchange.cfg)
     operations = local_state.get('operations', {})
     kill = operations.get('kill', {}).get('triggered')
     guard_path = exchange.intent_path.parent / exchange.cfg['exchange']['session_guard_filename']
@@ -68,7 +70,7 @@ async def preflight(exchange, symbol, websocket=True):
         if intent['status'] == 'pending' or (intent['type'] == 'market' and (
                 not record or record.get('fill_price_pending') or record['order'].get('status') not in ('FILLED', 'EXPIRED', 'CANCELED', 'REJECTED', 'EXPIRED_IN_MATCH'))):
             unresolved.append(client_id)
-    return {'session_guard_active': bool(guard.get('active')), 'storage_failed': storage_failed,
+    return {'local_policy_matches': policy_matches, 'session_guard_active': bool(guard.get('active')), 'storage_failed': storage_failed,
         'unresolved_intents': unresolved, 'pending_accounting': pending_accounting, 'local_kill_latch': kill, 'mode': 'demo', 'equity_usdt': exchange.equity, 'available_usdt': exchange.free,
         'positions': len(exchange.positions), 'regular_orders': sum(not o.get('is_algo') for o in orders),
         'algo_orders': sum(bool(o.get('is_algo')) for o in orders), 'account_can_trade': can_trade,
@@ -80,7 +82,9 @@ async def preflight(exchange, symbol, websocket=True):
         'local_pending_intents': sum(i['status'] == 'pending' for i in exchange.intents.values()),
         'pending_execution_prices': pending_prices,
         'pending_native_exits': pending_native,
-        'requires_operator_review': bool(exchange.positions or orders or kill or guard.get('active') or storage_failed or unresolved or pending_accounting or pending_prices or pending_native
+        'entry_blocks': operations.get('kill', {}).get('entry_blocks', {}),
+        'same_symbol_loss_cooldowns': operations.get('loss_cooldowns', {}),
+        'requires_operator_review': bool(not policy_matches or exchange.positions or orders or kill or guard.get('active') or storage_failed or unresolved or pending_accounting or pending_prices or pending_native
                                          or not choice.get('entry_order_valid', False) or can_trade is not True or websocket and not ws_ok)}
 
 

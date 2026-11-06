@@ -16,16 +16,16 @@ log = logging.getLogger("CASCADE")
 
 # === CONFIG ===
 
-LEVERAGE = load_config()["leverage"]
-MAX_POSITION_PCT = 0.10          # 10% من رصيد المحفظة الحالي كهامش لكل صفقة
-CASCADE_THRESHOLD = 0.012        # 1.2%
-VOLUME_SPIKE = 3.5
-COOLDOWN_SEC = 8
-
-SCAN_INTERVAL = 600              # 10 دقائق
-MAX_SYMBOLS_TO_SCAN = 40         # أعلى 40 عملة سيولة
-MAX_CONCURRENT_POSITIONS = 3     # أقصى عدد مراكز مفتوحة في نفس الوقت
-MIN_QUOTE_VOLUME = 15_000_000    # حجم تداول 24 ساعة أدنى (USDT)
+_BASELINE = load_config()
+LEVERAGE = _BASELINE['leverage']
+MAX_POSITION_PCT = _BASELINE['margin_fraction_per_position']
+CASCADE_THRESHOLD = _BASELINE['cascade_threshold']
+VOLUME_SPIKE = _BASELINE['volume_spike']
+COOLDOWN_SEC = _BASELINE['cooldown_sec']
+SCAN_INTERVAL = _BASELINE['universe_refresh_sec']
+MAX_SYMBOLS_TO_SCAN = _BASELINE['max_symbols']
+MAX_CONCURRENT_POSITIONS = _BASELINE['max_concurrent_positions']
+MIN_QUOTE_VOLUME = _BASELINE['min_quote_volume_usdt']
 
 class CascadeHunter:
     """V2 strategy methods; execution is supplied by the virtual account runtime."""
@@ -56,12 +56,12 @@ class CascadeHunter:
         return price * cfg["atr"]["fallback_atr_pct"], "fallback"
 
     async def set_leverage(self, symbol):
-        if getattr(self, 'execution_mode', 'paper') == 'testnet' and self.cfg['exchange'].get('leverage_policy') == 'maximum_by_bracket':
-            return  # selected and confirmed while sizing
-        try:
-            await self.exchange.set_leverage(LEVERAGE, symbol)
-        except Exception as e:
-            log.warning(f"Leverage set failed {symbol}: {e}")
+        if getattr(self, 'execution_mode', 'paper') != 'paper':
+            choice = self.exchange.selected_leverage.get(symbol)
+            if not choice or not choice['confirmed']:
+                raise ValueError('Leverage not confirmed before entry')
+            return
+        await self.exchange.set_leverage(self.cfg['leverage'], symbol)
 
     async def get_top_symbols(self):
         """يجيب أعلى العملات سيولة (USDT-M linear)"""
@@ -132,28 +132,40 @@ class CascadeHunter:
         bal = await self.exchange.fetch_balance()
         usdt = max(0.0, float(bal["USDT"].get("equity", bal["USDT"]["total"])))  # current equity, not initial capital
         price = (await self.exchange.fetch_ticker(symbol))["last"]
-        if getattr(self, 'execution_mode', 'paper') == 'testnet' and self.cfg['exchange'].get('leverage_policy') == 'maximum_by_bracket':
+        if getattr(self, 'execution_mode', 'paper') != 'paper':
             choice = await self.exchange.select_leverage(symbol, usdt * self.cfg['margin_fraction_per_position'], price)
             return choice['amount'] if choice.get('entry_order_valid', True) else 0.0
-        notional = usdt * MAX_POSITION_PCT * LEVERAGE
-        if getattr(self, "execution_mode", "paper") == "mainnet":
-            notional *= self.exchange.allocation_fraction
-        amount = notional / price
-        amount = float(self.exchange.amount_to_precision(symbol, amount))
-        return amount
+        from risk.trading_policy import entry_amount
+        return entry_amount(usdt, price, self.cfg['leverage'], self.cfg, self.exchange.fee_rate,
+                            lambda q: float(self.exchange.amount_to_precision(symbol, q)))
 
     async def enter(self, symbol, side, price):
+        if symbol in self.positions: return False
         now = datetime.now(timezone.utc).timestamp()
         if symbol in self.last_trade and now - self.last_trade[symbol] < COOLDOWN_SEC:
             return False
         if len(self.positions) >= MAX_CONCURRENT_POSITIONS:
             return False
 
-        amount = await self.size_position(symbol)
+        try:
+            amount = await self.size_position(symbol)
+        except Exception as error:
+            from infra.errors import diagnostic_fields
+            await self.safety.event('entry_configuration_failed', 'warning', symbol=symbol,
+                stage='sizing_and_leverage', recovery_action='no_entry_sent', **diagnostic_fields(error))
+            return False
         if amount <= 0:
             return False
 
         try:
+            from risk.trading_policy import expected_slippage_bps
+            if self.cfg['exit'].get('policy') == 'hard_stop_trailing':
+                book = await self.exchange.fetch_order_book(symbol, limit=self.cfg['kill_switch']['book_depth'])
+                expected_bps = expected_slippage_bps(book, side, amount, price)
+                if expected_bps > self.cfg['slippage']['max_expected_entry_bps']:
+                    await self.safety.event('entry_blocked', reason='expected_slippage', symbol=symbol,
+                        report={'expected_bps': expected_bps if expected_bps != float('inf') else None})
+                    return False
             atr, atr_source = await self.exit_atr(symbol, price)
             await self.set_leverage(symbol)
             fill = await self.exchange.create_order(
@@ -165,7 +177,7 @@ class CascadeHunter:
             log.info(f"ENTER {side.upper()} {symbol} size={amount:.4f} @ {price:.4f}")
             return True
         except Exception as e:
-            log.error(f"Entry failed {symbol}: {e}")
+            log.error("Entry failed %s (%s)", symbol, type(e).__name__)
             return False
 
     async def manage_exits(self):
@@ -209,14 +221,15 @@ class CascadeHunter:
                 be_stop = pos.entry * (1 + sm * exit_cfg["be_offset_pct"])
                 if sm * (pos.stop - previous_stop) > 0 and sm * (pos.stop - be_stop) > 0:
                     pos["trail_moved"] = True
-                hit_tp = (pos["side"] == "buy" and price >= pos["tp"]) or \
-                         (pos["side"] == "sell" and price <= pos["tp"])
+                hit_tp = pos.get('tp') is not None and ((pos["side"] == "buy" and price >= pos["tp"]) or
+                         (pos["side"] == "sell" and price <= pos["tp"]))
                 hit_sl = (pos["side"] == "buy" and price <= pos["sl"]) or \
                          (pos["side"] == "sell" and price >= pos["sl"])
 
                 if hit_tp or hit_sl:
                     close_side = "sell" if pos["side"] == "buy" else "buy"
-                    reason = "SL" if hit_sl else "TP"
+                    from risk.trading_policy import stop_reason
+                    reason = stop_reason(pos) if hit_sl else "TP"
                     if hasattr(self, "close_position"):
                         await self.close_position(symbol, reason, price)
                     else:
@@ -240,7 +253,7 @@ class CascadeHunter:
             try:
                 async with self.lock:
                     await self.manage_exits()
-                await asyncio.sleep(8)
+                await asyncio.sleep(self.cfg["exit"]["check_sec"])
             except Exception as e:
                 if getattr(self, 'execution_mode', 'paper') != 'paper':
                     from infra.errors import diagnostic_fields

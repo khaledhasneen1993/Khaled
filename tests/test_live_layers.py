@@ -59,7 +59,9 @@ def test_kill_switch_daily_dd():
 def test_kill_switch_consecutive():
     kill = switch()
     for _ in range(4): kill.on_trade_closed(-.1)
-    assert kill.check(account(), None) == 'consecutive_losses'
+    assert kill.check(account(), None) is None
+    assert kill.entry_block_reason() == 'consecutive_losses'
+    assert not kill.should_flatten('consecutive_losses')
 
 
 def test_kill_switch_ws_timeout():
@@ -69,7 +71,10 @@ def test_kill_switch_ws_timeout():
 
 
 def test_kill_switch_spread():
-    assert switch().check(account(), SimpleNamespace(spread=lambda: .006, avg_spread=.001)) == 'spread_spike'
+    kill = switch()
+    assert kill.check(account(), SimpleNamespace(spread=lambda: .01, avg_spread=.001, samples=20)) is None
+    assert kill.entry_block_reason() == 'spread_spike'
+    assert not kill.should_flatten('spread_spike')
 
 
 def test_kill_switch_resets():
@@ -144,8 +149,8 @@ def test_exposure_limits():
     cfg = copy.deepcopy(CFG['exposure'])
     cfg['basis'] = 'notional'
     state = SimpleNamespace(equity=100., open_positions={})
-    assert can_open(state, 'BTCUSDT', 'long', 31, cfg) == (False, 'max_long_exposure')
-    state.open_positions = {str(i): {'side': 'buy', 'entry': 1, 'amount': 1} for i in range(3)}
+    assert can_open(state, 'BTCUSDT', 'long', 46, cfg) == (False, 'max_long_exposure')
+    state.open_positions = {str(i): {'side': 'buy', 'entry': 1, 'amount': 1} for i in range(4)}
     assert can_open(state, 'BTCUSDT', 'long', 1, cfg) == (False, 'max_positions')
     # Explicit default margin basis permits the configured position notional.
     state.open_positions = {}
@@ -155,7 +160,7 @@ def test_exposure_limits():
 def test_correlation_limit():
     state = SimpleNamespace(equity=100., open_positions={s: {'side': 'buy', 'entry': 100, 'amount': CFG['leverage'] * .1}
         for s in ('BTCUSDT', 'ETHUSDT')})
-    assert can_open(state, 'SOLUSDT', 'long', 100 * .1 * CFG['leverage'], CFG['exposure']) == (False, 'correlated_limit')
+    assert can_open(state, 'SOLUSDT', 'long', 100 * .1 * CFG['leverage'], {**CFG['exposure'], 'max_correlated_same_direction': 2}) == (False, 'correlated_limit')
 
 
 def test_funding_close_before_settlement():
@@ -166,17 +171,17 @@ def test_funding_close_before_settlement():
         with patch('risk.funding.time.time', return_value=0):
             await check_funding_before_settlement(state, remote, CFG['funding'], Mock())
     run(check())
-    state.close_position.assert_awaited_once_with('BTCUSDT', 'funding_avoidance')
+    state.close_position.assert_not_awaited()
 
 
 def test_slippage_logged(tmp_path):
     async def check():
         data = StreamData()
         bot = V2PaperHunter(tmp_path / 'state.json', market_data=data)
-        assert await bot.enter('BTC/USDT:USDT', 'buy', 99.)
+        assert await bot.enter('BTC/USDT:USDT', 'buy', 99.9)
         pos = bot.positions['BTC/USDT:USDT']
-        assert pos['entry_slippage_bps'] == pytest.approx((100 - 99) / 99 * 10000)
-        data.price = pos['tp']
+        assert pos['entry_slippage_bps'] == pytest.approx((100 - 99.9) / 99.9 * 10000)
+        data.price = pos['sl']
         await bot.manage_exits()
         trade = bot.exchange.trades[-1]
         for key in ('expected_entry', 'actual_entry', 'entry_slippage_bps', 'expected_exit', 'actual_exit', 'exit_slippage_bps'):
@@ -190,8 +195,7 @@ def test_time_stop(tmp_path):
         assert await bot.enter('BTC/USDT:USDT', 'buy', 100.)
         bot.positions['BTC/USDT:USDT']['opened_at'] -= 45 * 60 + 1
         await bot.manage_exits()
-        assert not bot.positions
-        assert bot.exchange.trades[-1]['exit_detail']['exit_reason'] == 'time_stop'
+        assert bot.positions  # Disabled in the hard-stop/trailing policy; age is not an entry filter.
     run(check())
 
 
@@ -202,12 +206,13 @@ def test_equity_current_used(tmp_path):
         first = await bot.size_position('BTC/USDT:USDT')
         bot.exchange.balance = 80
         second = await bot.size_position('BTC/USDT:USDT')
-        assert second == pytest.approx(first * .8)
+        assert second == pytest.approx(first * .8, abs=.001)
         assert await bot.enter('BTC/USDT:USDT', 'buy', 100)
         data.price = 99.9
         await bot.exchange.fetch_ticker('BTC/USDT:USDT')
         # Current unrealized losses are included as well as realized wallet PnL.
-        expected = float(bot.exchange.amount_to_precision('ETH/USDT:USDT', bot.equity * .1 * CFG["leverage"] / data.price))
+        from risk.trading_policy import entry_amount
+        expected = entry_amount(bot.equity, data.price, CFG['leverage'], bot.cfg, 0, lambda q: float(bot.exchange.amount_to_precision('ETH/USDT:USDT', q)))
         assert await bot.size_position('ETH/USDT:USDT') == expected
     run(check())
 

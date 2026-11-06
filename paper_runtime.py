@@ -75,10 +75,12 @@ class DynamicPaperHunter(dynamic.CascadeHunter, PaperState):
             "COOLDOWN_SEC", "SCAN_INTERVAL",
             "MAX_SYMBOLS_TO_SCAN", "MAX_CONCURRENT_POSITIONS", "MIN_QUOTE_VOLUME",
         )}}
-        if self.execution_mode != 'paper': result['LEVERAGE'] = self.cfg['exchange']['leverage_policy']
+        if self.execution_mode != 'paper' and self.cfg['exchange']['leverage_policy'] != 'fixed':
+            result['LEVERAGE'] = self.cfg['exchange']['leverage_policy']
         return result
 
     async def enter(self, symbol, side, price):
+        if symbol in self.positions: return False
         # ContinuousScanner owns the entry lock; do not acquire it again here.
         if self.execution_mode != "paper":
             if not self.safety.ready:
@@ -96,7 +98,7 @@ class DynamicPaperHunter(dynamic.CascadeHunter, PaperState):
                         break
             if mismatch and not await self.safety.reconcile_once():
                 return False
-        if (self.safety.active or self.execution_mode != "paper") and not await self.safety.allow_entry(symbol, side, price):
+        if not await self.safety.allow_entry(symbol, side, price):
             return False
         result = await self.strategy.CascadeHunter.enter(self, symbol, side, float(price))
         if getattr(self.exchange, "execution_fault", None):
@@ -134,6 +136,8 @@ class DynamicPaperHunter(dynamic.CascadeHunter, PaperState):
                     sm = 1 if pos['side'] == 'buy' else -1
                     if sm * (pos['sl'] - self.positions[symbol]['sl']) > 0:
                         self.positions[symbol]['sl'] = pos['sl']
+                    for field in ('trailing_armed', 'trailing_extreme'):
+                        if field in pos and field not in self.positions[symbol]: self.positions[symbol][field] = pos[field]
                     self.positions[symbol]['entry_fee'] = pos['entry_fee']
                     self.positions[symbol]['accounting_status'] = pos.get('accounting_status', 'pending')
                     self.positions[symbol]['protection'] = copy.deepcopy(pos.get('protection', {}))
@@ -244,7 +248,9 @@ class DynamicPaperHunter(dynamic.CascadeHunter, PaperState):
                 for key in ("expected_exit", "actual_exit", "exit_slippage_bps"):
                     if key in trade: trade["exit_detail"][key] = trade[key]
                 trade["exit_detail"]["actual_exit"] = weighted_exit
-                self.safety.kill.on_trade_closed(trade["exit_detail"]["net_pnl_usdt"]) if not self.safety.active else None
+                if not self.safety.active:
+                    self.safety.kill.on_trade_closed(trade['exit_detail']['net_pnl_usdt'])
+                    self.safety.note_closed(symbol, trade['exit_detail']['net_pnl_usdt'], trade['timestamp'])
                 if self.safety.active: self._notifications.append(trade)
                 break
 

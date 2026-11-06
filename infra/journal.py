@@ -6,7 +6,7 @@ from pathlib import Path
 
 class OperationalJournal:
     """Allowlisted structured records; never serialize exceptions or credentials."""
-    fields = {'symbol', 'client_id', 'order_id', 'reason', 'status', 'code', 'mode',
+    fields = {'symbol', 'side', 'client_id', 'order_id', 'reason', 'status', 'code', 'mode',
               'report', 'equity', 'daily_pnl', 'count', 'pnl', 'expected', 'actual',
               'entry_slippage_bps', 'exit_slippage_bps', 'rate', 'average', 'attempt',
               'stage', 'client_order_id', 'error_type', 'http_status', 'exchange_error_code', 'recovery_action', 'amount', 'leverage', 'min_qty', 'max_qty', 'transport_error_type', 'source', 'line', 'function'}

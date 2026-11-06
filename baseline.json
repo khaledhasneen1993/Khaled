@@ -1,14 +1,14 @@
 {
   "name": "Khaled Cascade Hunter",
-  "version": "3.2.3",
+  "version": "4.0.0",
   "status": "approved_source_baseline",
   "python": ">=3.11",
-  "primary_entrypoint": "run_bot.py",
+  "primary_entrypoint": "run_demo.py",
   "initial_balance_usdt": 100,
   "position_basis": "current_equity",
   "leverage": 10,
   "margin_fraction_per_position": 0.1,
-  "max_concurrent_positions": 3,
+  "max_concurrent_positions": 4,
   "stop_basis": "fill_price",
   "cascade_threshold": 0.012,
   "volume_spike": 3.5,
@@ -26,17 +26,23 @@
     "min_rr": 1.5,
     "mmr": 0.004,
     "liq_safety_margin": 0.003,
-    "max_equity_risk_pct": 0.03
+    "max_equity_risk_pct": 0.025
   },
   "atr": {
     "period": 14,
     "fallback_atr_pct": 0.004
   },
   "exit": {
-    "be_trigger_pct": 0.006,
+    "be_trigger_pct": 0.015,
     "be_offset_pct": 0.001,
     "trail_enabled": true,
-    "trail_atr_mult": 1.2
+    "trail_atr_mult": 1.2,
+    "policy": "hard_stop_trailing",
+    "hard_stop_pct": 0.08,
+    "trail_arm_pct": 0.015,
+    "trail_distance_pct": 0.006,
+    "allow_partial_close": false,
+    "check_sec": 1
   },
   "updated_on": "2026-11-06",
   "dashboard": {
@@ -91,7 +97,7 @@
       -2013
     ],
     "account_refresh_sec": 5,
-    "leverage_policy": "maximum_by_bracket",
+    "leverage_policy": "fixed",
     "leverage_rejection_codes": [
       -4028,
       -2027,
@@ -107,25 +113,28 @@
     "max_consecutive_losses": 4,
     "ws_timeout_sec": 30,
     "api_error_limit": 5,
-    "spread_spike_mult": 5.0,
+    "spread_spike_mult": 9.0,
     "api_window_sec": 60,
     "api_warning_count": 3,
     "ws_warning_sec": 10,
     "monitor_interval_sec": 1,
     "spread_window": 50,
-    "spread_warmup": 5,
+    "spread_warmup": 20,
     "flatten_attempts": 3,
     "flatten_retry_sec": 2,
     "spread_poll_sec": 5,
-    "book_depth": 20
+    "book_depth": 20,
+    "spread_block_sec": 90,
+    "consecutive_loss_pause_sec": 600,
+    "daily_drawdown_action": "block_entries"
   },
   "exposure": {
     "basis": "margin",
-    "max_concurrent": 3,
-    "max_long_exposure_pct": 0.3,
-    "max_short_exposure_pct": 0.3,
-    "max_gross_exposure_pct": 0.5,
-    "max_correlated_same_direction": 2,
+    "max_concurrent": 4,
+    "max_long_exposure_pct": 0.45,
+    "max_short_exposure_pct": 0.45,
+    "max_gross_exposure_pct": 0.45,
+    "max_correlated_same_direction": 4,
     "leverage": 10,
     "correlated_groups": [
       [
@@ -144,11 +153,15 @@
   "funding": {
     "warning_minutes": 5,
     "close_threshold": 0.0005,
-    "poll_sec": 60
+    "poll_sec": 60,
+    "block_new_entries": true,
+    "close_positions": false
   },
   "slippage": {
-    "alert_bps": 5.0,
-    "window": 50
+    "alert_bps": 20.0,
+    "window": 50,
+    "max_expected_entry_bps": 30.0,
+    "alert_cooldown_sec": 600
   },
   "alerts": {
     "telegram_enabled": true,
@@ -162,7 +175,7 @@
     "message_max_chars": 3500
   },
   "time_stop": {
-    "enabled": true,
+    "enabled": false,
     "minutes": 45,
     "min_profit_pct": 0.002
   },
@@ -196,7 +209,7 @@
     "scale_factor": 2,
     "max_mainnet_fraction": 1.0
   },
-  "approved_on": "2026-11-05",
+  "approved_on": "2026-11-06",
   "approval_scope": "repository_source_and_offline_tests",
   "live_acceptance_status": "pending_testnet",
   "comparison_dashboard": {
@@ -214,5 +227,6 @@
     "huma_close_order_id": 247831491,
     "huma_symbol": "HUMAUSDT",
     "huma_confirmed_realized_pnl": "-1.06663200"
-  }
+  },
+  "same_symbol_loss_cooldown": 600
 }

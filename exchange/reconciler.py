@@ -40,7 +40,7 @@ async def reconcile(exchange, state, journal):
     remote_ids = {o['clientOrderId'] for o in remote_orders}
     for symbol, pos in list(local.items()):
         if hasattr(exchange, 'protect') and symbol in remote:
-            for name in ('sl', 'tp'):
+            for name in (('sl',) if pos.get('tp') is None else ('sl', 'tp')):
                 if name not in pos.get('protection', {}): report['missing_protection'].append(symbol + ':' + name)
         for protection in pos.get('protection', {}).values():
             if protection['clientOrderId'] in remote_ids: continue

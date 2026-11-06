@@ -136,6 +136,9 @@ class FuturesSimulator:
         elif path.endswith('/positionSide/dual'): data = {'dualSidePosition': False}
         elif path.endswith('/multiAssetsMargin'): data = {'multiAssetsMargin': False}
         elif path.endswith('/accountConfig'): data = {'canTrade': True}
+        elif path.endswith('/symbolConfig'):
+            data = [dict(symbol=s, marginType=self.margin_type.get(s, 'CROSSED'),
+                         leverage=self.leverage.get(s, self.specs[s][3]), maxNotionalValue='1000000')]
         elif path.endswith('/marginType'):
             self.margin_type[s] = p['marginType']; data = {'code': 200}
         elif path.endswith('/leverageBracket'): data = [dict(symbol=s, brackets=self.brackets(s))]
@@ -155,7 +158,7 @@ class FuturesSimulator:
             price = str(self.prices[s]); minute = int(time.time() // 60) * 60000
             data = [[minute - i * 60000, price, price, price, price, '10'] for i in reversed(range(int(p['limit'])))]
         elif path.endswith('/depth'):
-            data = dict(bids=[[str(self.prices[s] * D('.99999')), '10']], asks=[[str(self.prices[s] * D('1.00001')), '10']])
+            data = dict(bids=[[str(self.prices[s] * D('.99999')), '1000000000']], asks=[[str(self.prices[s] * D('1.00001')), '1000000000']])
         elif path.endswith('/premiumIndex'):
             data = dict(lastFundingRate='0', nextFundingTime=int((time.time() + 3600) * 1000))
         elif path == '/fapi/v1/order':
@@ -198,8 +201,12 @@ class FuturesSimulator:
         return httpx.Response(400, json={'code': -2013}) if data is None else httpx.Response(200, json=data)
 
 
-async def production_bot(tmp_path, monkeypatch, server, startup=True):
-    cfg = load_config()
+async def production_bot(tmp_path, monkeypatch, server, startup=True, legacy=False):
+    if legacy:
+        from legacy_config import legacy_execution_config
+        cfg = legacy_execution_config()
+    else:
+        cfg = load_config()
     cfg['exchange'].update(mode='testnet', state_dir=str(tmp_path))
     cfg['rollout']['evidence_file'] = str(tmp_path / 'evidence.json')
     cfg['rollout']['operator_policy_file'] = str(tmp_path / '{mode}' / 'policy.json')

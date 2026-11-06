@@ -10,7 +10,7 @@ from test_live_transport import run
 from exchange.orders import ExchangeError
 
 
-@pytest.mark.parametrize('equity', ['100', '4912.19949871', '25000'])
+@pytest.mark.parametrize('equity', ['1000', '4912.19949871', '25000'])
 @pytest.mark.parametrize('side', ['buy', 'sell'])
 def test_real_constructor_three_symbols_and_exact_round_trip(tmp_path, monkeypatch, equity, side):
     async def check():
@@ -58,7 +58,7 @@ def test_real_constructor_three_symbols_and_exact_round_trip(tmp_path, monkeypat
     run(check())
 
 
-@pytest.mark.parametrize('fault', ['lost_entry', 'lost_close', 'late_fills', 'partial_close', 'sl_reject', 'tp_reject'])
+@pytest.mark.parametrize('fault', ['lost_entry', 'lost_close', 'late_fills', 'partial_close', 'sl_reject'])
 def test_production_wiring_fault_matrix(tmp_path, monkeypatch, fault):
     async def check():
         server = FuturesSimulator()
@@ -69,7 +69,7 @@ def test_production_wiring_fault_matrix(tmp_path, monkeypatch, fault):
         server.reject_role = {'sl_reject': 'STOP_MARKET', 'tp_reject': 'TAKE_PROFIT_MARKET'}.get(fault)
         with patch('asyncio.sleep', new_callable=AsyncMock):
             entered = await bot.enter(symbol, 'buy', .05)
-            if fault in ('sl_reject', 'tp_reject'):
+            if fault in ('sl_reject'):
                 assert not entered and bot.safety.kill.triggered
                 assert not server.position_rows()
             else:

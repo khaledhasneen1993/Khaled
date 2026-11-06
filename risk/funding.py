@@ -3,6 +3,7 @@ from risk.liq_math import direction
 
 
 async def check_funding_before_settlement(state, exchange, cfg, journal):
+    if not cfg.get('close_positions', False): return
     for symbol, pos in list(state.open_positions.items()):
         data = await exchange.get_funding_rate(symbol)
         # Use Binance's actual nextFundingTime (intervals can vary by contract).

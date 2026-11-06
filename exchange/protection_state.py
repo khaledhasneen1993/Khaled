@@ -3,6 +3,7 @@ import asyncio
 import copy
 from decimal import Decimal
 
+from risk.trading_policy import stop_reason
 from .orders import ExchangeError, ExecutionUnknown, FillPriceUnavailable, TERMINAL_ORDER_STATUSES as TERMINAL
 
 
@@ -16,8 +17,9 @@ class ProtectionGuardError(ExecutionUnknown):
 def price_exit_reason(pos, price):
     price = Decimal(str(price))
     sign = 1 if pos['side'] == 'buy' else -1
-    if sign * (price - Decimal(str(pos['sl']))) <= 0: return 'SL'
-    if sign * (price - Decimal(str(pos['tp']))) >= 0: return 'TP'
+    from risk.trading_policy import stop_reason
+    if sign * (price - Decimal(str(pos['sl']))) <= 0: return stop_reason(pos)
+    if pos.get('tp') is not None and sign * (price - Decimal(str(pos['tp']))) >= 0: return 'TP'
     return None
 
 
@@ -116,7 +118,7 @@ class NativeExitState:
                     or order.get('reduceOnly') not in (True, 'true')):
                 raise ProtectionGuardError('native_exit_identity_mismatch', {'symbol': symbol})
             options = dict(reduceOnly=True, signal_id=pos['signal_id'], exit_position=copy.deepcopy(pos),
-                expected_price=float(protection['trigger']), exit_reason='SL' if name == 'sl' else 'TP',
+                expected_price=float(protection['trigger']), exit_reason=stop_reason(pos) if name == 'sl' else 'TP',
                 native_parent_id=parent['algoId'], native_parent_client_id=protection['clientOrderId'])
             order = await self._settle_native_order(symbol, order, options)
             events.append({'reason': options['exit_reason'], 'trigger': options['expected_price'],

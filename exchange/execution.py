@@ -40,6 +40,8 @@ class DurableExecution:
         if sm * (local['sl'] - canonical['sl']) > 0: canonical['sl'] = local['sl']
         for key in ('breakeven_armed', 'trail_moved', 'risk_capped'):
             canonical[key] = canonical.get(key, False) or local.get(key, False)
+        for key in ('trailing_armed', 'trailing_extreme'):
+            if key in local: canonical[key] = local[key]
         if protection and 'protection' in local: canonical['protection'] = copy.deepcopy(local['protection'])
 
     def _remember_order(self, symbol, order, options, side):
@@ -494,11 +496,12 @@ class DurableExecution:
             if any(float(p['positionAmt']) != 0 for p in await self.get_position(symbol)):
                 raise ExecutionUnknown()
             choice = self.selected_leverage.get(symbol)
-            if self.cfg['exchange'].get('leverage_policy') == 'maximum_by_bracket':
+            if self.cfg['exchange'].get('leverage_policy') in ('maximum_by_bracket', 'fixed'):
                 if choice and choice.get('entry_order_valid') is False:
                     raise OrderValidationError(choice['validation_reason'])
                 if not choice or not choice['confirmed']: raise ValueError('Leverage must be selected and confirmed before sizing')
-                amount = choice['amount']
+                if not math.isclose(amount, choice['amount'], rel_tol=self.cfg['exchange']['fill_qty_tolerance_pct']):
+                    raise OrderValidationError('quantity_differs_from_confirmed_sizing')
                 leverage = choice['leverage']
                 risk_cfg = copy.deepcopy(self.cfg)
                 bracket = bracket_for(self.brackets[symbol], amount * float(options['expected_price']))
@@ -524,6 +527,8 @@ class DurableExecution:
             remote = [p for p in await self.get_position(symbol) if float(p['positionAmt']) != 0]
             if not remote: raise ExecutionUnknown()
             residual = float(remote[0]['positionAmt'])
+            if self.cfg['exit'].get('policy') == 'hard_stop_trailing' and not math.isclose(amount, abs(residual), rel_tol=self.cfg['exchange']['fill_qty_tolerance_pct']):
+                raise OrderValidationError('partial_close_disabled')
             if (residual > 0) != (side == 'sell'): raise ValueError('Close side does not reduce actual position')
             maximum = self.market(symbol)['limits']['amount'].get('max', float('inf'))
             amount = min(amount, abs(residual), maximum)

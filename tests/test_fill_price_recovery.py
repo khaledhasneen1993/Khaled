@@ -38,7 +38,7 @@ def test_filled_first_response_missing_average_recovers_without_extra_post(tmp_p
         if reducing:
             assert not server.position_rows() and not bot.positions
         else:
-            assert set(bot.positions[symbol]['protection']) == {'sl', 'tp'}
+            assert set(bot.positions[symbol]['protection']) == {'sl'}
             assert bot.exchange.trades[0]['price'] == .05
         # The initial zero average is retained even after a later priced query.
         intent = next(i for i in bot.exchange.intents.values() if i['type'] == 'market' and bool(i['params'].get('reduceOnly')) == reducing)

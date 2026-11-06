@@ -15,7 +15,7 @@ class PublicData:
         return {"last": self.price}
 
     async def fetch_order_book(self, symbol, limit):
-        return {"bids": [[100, 9]], "asks": [[100, 1]]}
+        return {"bids": [[self.price, 900000000]], "asks": [[self.price, 100000000]]}
 
     async def fetch_ohlcv(self, symbol, timeframe, limit):
         rows = [[i, 100, 100, 100, 100, 1] for i in range(limit)]

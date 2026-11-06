@@ -12,6 +12,7 @@ from infra.alerts import TelegramAlerter
 from infra.errors import diagnostic_fields
 from infra.journal import OperationalJournal, atomic_json
 from risk.kill_switch import KillSwitch
+from risk.liq_math import direction
 from risk.exposure_limits import can_open
 from risk.funding import check_funding_before_settlement
 from risk.slippage import check_slippage_health
@@ -33,24 +34,31 @@ class SafetySupervisor:
         self.last_recon = self.last_funding = self.last_evidence = self.last_spread = self.last_account = 0.
         self.last_report_day = None
         self.warned = set()
+        self.last_announced_reason = None
         self.open_orders = {}
         self.accounted_closes = set()
         self.storage_failed = False
+        self.loss_cooldowns = {}
+        self.last_slippage_alert = 0.
         self.evidence = None
         if bot.execution_mode in ('testnet', 'mainnet'):
             from exchange.rollout import TestnetEvidence
             self.evidence = TestnetEvidence(self.cfg, bot.execution_mode)
 
     def dump(self):
-        return {'accounted_closes': sorted(self.accounted_closes), 'storage_failed': self.storage_failed, 'kill': self.kill.dump(), 'last_report_day': self.last_report_day,
-                'announced_kill': 'kill_announced' in self.warned}
+        return {'loss_cooldowns': self.loss_cooldowns, 'last_slippage_alert': self.last_slippage_alert, 'accounted_closes': sorted(self.accounted_closes), 'storage_failed': self.storage_failed, 'kill': self.kill.dump(), 'last_report_day': self.last_report_day,
+                'announced_kill': 'kill_announced' in self.warned, 'announced_kill_reason': self.last_announced_reason}
 
     def restore(self, value):
         self.accounted_closes = set(value.get('accounted_closes', []))
+        self.loss_cooldowns = value.get('loss_cooldowns', {})
+        self.last_slippage_alert = value.get('last_slippage_alert', 0.)
         self.storage_failed = value.get('storage_failed', False)
         self.kill.restore(value['kill'])
         self.last_report_day = value.get('last_report_day')
-        if value.get('announced_kill'): self.warned.add('kill_announced')
+        if value.get('announced_kill'):
+            self.warned.add('kill_announced')
+            self.last_announced_reason = value.get('announced_kill_reason') or self.kill.triggered
         if self.kill.triggered:
             self.ready = False
 
@@ -70,7 +78,7 @@ class SafetySupervisor:
         history = self.spreads.setdefault(symbol, deque(maxlen=self.cfg['kill_switch']['spread_window']))
         # Never include the candidate spike in its own reference mean.
         if len(history) >= self.cfg['kill_switch']['spread_warmup']:
-            self.latest[symbol] = SimpleNamespace(avg_spread=sum(history) / len(history), spread=lambda: spread)
+            self.latest[symbol] = SimpleNamespace(avg_spread=sum(history) / len(history), spread=lambda: spread, samples=len(history))
         history.append(spread)
 
     async def allow_entry(self, symbol, side, price):
@@ -80,7 +88,24 @@ class SafetySupervisor:
         if reason := self.kill.check(self.bot.exchange, market):
             await self.trip(reason)
             return False
-        notional = self.bot.exchange.equity * self.cfg['margin_fraction_per_position'] * self.cfg['leverage']
+        block = self.kill.entry_block_reason()
+        if self.loss_cooldowns.get(symbol, 0) > time.time(): block = 'same_symbol_loss_cooldown'
+        if block:
+            if block not in self.warned:
+                self.warned.add(block)
+                await self.event('entry_blocked', 'warning', symbol=symbol, reason=block)
+                self.save_safely()
+            return False
+        for name in ('spread_spike', 'consecutive_losses', 'same_symbol_loss_cooldown'): self.warned.discard(name)
+        if self.live and self.cfg['funding']['block_new_entries']:
+            data = await self.bot.exchange.get_funding_rate(symbol)
+            minutes = (int(data['nextFundingTime']) / 1000 - time.time()) / 60
+            if (0 <= minutes <= self.cfg['funding']['warning_minutes']
+                    and direction(side) * float(data['lastFundingRate']) > self.cfg['funding']['close_threshold']):
+                await self.event('entry_blocked', symbol=symbol, reason='funding_window')
+                return False
+        from risk.trading_policy import entry_amount
+        notional = entry_amount(self.bot.exchange.equity, price, self.cfg['leverage'], self.cfg, self.bot.exchange.fee_rate) * price
         if self.bot.execution_mode == 'mainnet':
             notional *= self.bot.exchange.allocation_fraction
         allowed, reason = can_open(self.bot, symbol, side, notional, self.cfg['exposure'])
@@ -100,12 +125,23 @@ class SafetySupervisor:
         self.kill.roll_day(self.bot.exchange.equity)
         self.kill.on_trade_closed(detail['net_pnl_usdt'], trade.get('exit_time', trade.get('timestamp')))
         self.save_safely()
-        await self.event('trade_closed', symbol=trade['symbol'], reason=detail['exit_reason'], pnl=detail['net_pnl_usdt'])
+        self.note_closed(trade['symbol'], detail['net_pnl_usdt'], trade.get('exit_time', trade.get('timestamp')))
+        self.save_safely()
+        await self.event('trade_closed', symbol=trade['symbol'], side=detail['side'], reason=detail['exit_reason'],
+                         pnl=detail['net_pnl_usdt'], equity=self.bot.exchange.equity)
         if self.kill.check(self.bot.exchange, None):
             # Caller holds the trade lock: monitor will flatten on its next tick.
             self.ready = False
         if warning := check_slippage_health(self, self.cfg['slippage']):
-            await self.event('slippage_high', 'warning', reason=warning)
+            if time.time() - self.last_slippage_alert >= self.cfg['slippage']['alert_cooldown_sec']:
+                self.last_slippage_alert = time.time()
+                self.save_safely()
+                await self.event('slippage_high', 'warning', reason=warning)
+
+    def note_closed(self, symbol, pnl, closed_at=None):
+        if pnl < 0:
+            stamp = datetime.fromisoformat(closed_at).timestamp() if closed_at else time.time()
+            self.loss_cooldowns[symbol] = max(self.loss_cooldowns.get(symbol, 0), stamp + self.cfg['same_symbol_loss_cooldown'])
 
     def last_n(self, n):
         return [t for t in self.bot.exchange.trades if not t['reduceOnly']][-n:]
@@ -113,14 +149,21 @@ class SafetySupervisor:
     def save_safely(self):
         try:
             self.bot.save()
-        except OSError:
+        except (OSError, ValueError, TypeError):
             self.storage_failed = True
             self.ready = False
-            self.kill.triggered = self.kill.triggered or 'storage_failure'
+            if not self.kill.triggered or not self.kill.should_flatten(self.kill.triggered):
+                self.kill.triggered = 'storage_failure'
             return False
         return True
 
     async def trip(self, reason):
+        if reason in ('spread_spike', 'consecutive_losses'):
+            duration = self.cfg['kill_switch']['spread_block_sec' if reason == 'spread_spike' else 'consecutive_loss_pause_sec']
+            self.kill.entry_blocks[reason] = time.time() + duration
+            self.save_safely()
+            await self.event('entry_blocked', 'warning', reason=reason)
+            return
         exchange = self.bot.exchange
         if self.live: exchange.emergency_mode = True
         try:
@@ -130,17 +173,23 @@ class SafetySupervisor:
 
     async def _trip(self, reason):
         first = self.kill.triggered is None
+        if self.kill.triggered and not self.kill.should_flatten(self.kill.triggered) and self.kill.should_flatten(reason):
+            self.kill.triggered = reason
+            self.warned.discard('kill_announced')
         self.kill.triggered = self.kill.triggered or reason
         self.ready = False
         self.save_safely()  # Latch is durable before any market request.
-        if first or 'kill_announced' not in self.warned:
+        if first or 'kill_announced' not in self.warned or self.last_announced_reason != self.kill.triggered:
             self.warned.add('kill_announced')
+            self.last_announced_reason = self.kill.triggered
             if self.evidence and reason not in ('daily_drawdown', 'consecutive_losses', 'spread_spike', 'process_shutdown'):
                 self.evidence.data['technical_kills'] += 1
                 try: atomic_json(self.evidence.path, self.evidence.data)
                 except OSError: self.storage_failed = True
             self.save_safely()
             await self.event('kill_triggered', 'critical', reason=self.kill.triggered)
+        if not self.kill.should_flatten(self.kill.triggered):
+            return  # Keep managing native stops and recovery; only entries stop.
         # Repeat while latched. Failed flattening never removes remaining stops.
         remaining_orders = []
         for _ in range(self.cfg['kill_switch']['flatten_attempts']):
@@ -227,7 +276,7 @@ class SafetySupervisor:
             local, remote = self.bot.positions, self.bot.exchange.positions
             mismatch = set(local) != set(remote) or any(
                 local[s]['side'] != remote[s]['side']
-                or not math.isclose(local[s]['amount'], remote[s]['amount'], rel_tol=self.cfg['exchange']['fill_qty_tolerance_pct'])
+                or not math.isclose(local[s]['amount'], remote[s]['amount'], rel_tol=self.cfg['recon']['size_tolerance_pct'])
                 or not math.isclose(local[s]['entry'], remote[s]['entry'], rel_tol=self.cfg['recon']['entry_tolerance_pct'])
                 for s in set(local) & set(remote))
             if mismatch:
@@ -344,7 +393,7 @@ class SafetySupervisor:
                     if reason:
                         stage = 'kill_actions'
                         await self.trip(reason)
-                    elif self.live and now - self.last_recon >= self.cfg['recon']['interval_sec']:
+                    if self.live and (not reason or not self.kill.should_flatten(reason)) and now - self.last_recon >= self.cfg['recon']['interval_sec']:
                         stage = 'reconciliation_account_refresh'
                         await self.bot.exchange.refresh_account()
                         stage = 'reconciliation'

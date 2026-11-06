@@ -22,12 +22,15 @@ class KillSwitch:
         self.errors = deque()
         self.day = datetime.now(timezone.utc).date().isoformat()
         self.day_start_equity = None
+        self.entry_blocks = {}
+        self.handled_loss_streak = 0
 
     def on_trade_closed(self, pnl: float, closed_at=None):
         self.roll_day()
         closed_day = datetime.fromisoformat(closed_at).astimezone(timezone.utc).date().isoformat() if closed_at else self.day
         if closed_day == self.day: self.state.daily_pnl += pnl
         self.state.consecutive_losses = self.state.consecutive_losses + 1 if pnl < 0 else 0
+        if pnl >= 0: self.handled_loss_streak = 0
 
     def roll_day(self, equity=None):
         day = datetime.now(timezone.utc).date().isoformat()
@@ -65,30 +68,43 @@ class KillSwitch:
         self._prune()
         equity = float(state.equity)
         self.roll_day(equity)
-        if self.triggered:
-            return self.triggered
         if not math.isfinite(equity) or equity <= 0:
             self.triggered = 'invalid_equity'
+            return self.triggered
+        if self.triggered and self.should_flatten(self.triggered):
             return self.triggered
         if self.day_start_equity is None:
             self.day_start_equity = equity
         # Include unrealized losses; compare with a stable daily starting equity.
         day_loss = min(self.state.daily_pnl, equity - self.day_start_equity)
-        if day_loss <= -self.cfg['daily_dd_limit_pct'] * self.day_start_equity:
-            self.triggered = 'daily_drawdown'
-        elif self.state.consecutive_losses >= self.cfg['max_consecutive_losses']:
-            self.triggered = 'consecutive_losses'
-        elif time.time() - self.state.last_ws_heartbeat > self.cfg['ws_timeout_sec']:
+        if time.time() - self.state.last_ws_heartbeat > self.cfg['ws_timeout_sec']:
             self.triggered = 'ws_timeout'
         elif self.state.api_errors_1m >= self.cfg['api_error_limit']:
             self.triggered = 'api_errors'
-        elif market is not None and market.avg_spread > 0 and market.spread() > self.cfg['spread_spike_mult'] * market.avg_spread:
-            self.triggered = 'spread_spike'
+        elif day_loss <= -self.cfg['daily_dd_limit_pct'] * self.day_start_equity:
+            self.triggered = 'daily_drawdown'
+        if (market is not None and getattr(market, 'samples', 0) >= self.cfg['spread_warmup']
+                and math.isfinite(market.avg_spread) and market.avg_spread > 0
+                and math.isfinite(market.spread()) and market.spread() > self.cfg['spread_spike_mult'] * market.avg_spread):
+            self.entry_blocks['spread_spike'] = time.time() + self.cfg['spread_block_sec']
+        losses = self.state.consecutive_losses
+        if losses >= self.cfg['max_consecutive_losses'] and losses > self.handled_loss_streak:
+            self.entry_blocks['consecutive_losses'] = time.time() + self.cfg['consecutive_loss_pause_sec']
+            self.handled_loss_streak = losses
         return self.triggered
+
+    def entry_block_reason(self):
+        return next((reason for reason, until in self.entry_blocks.items() if until > time.time()), None)
+
+    def should_flatten(self, reason):
+        if reason == 'daily_drawdown': return self.cfg['daily_drawdown_action'] == 'flatten'
+        if reason in ('spread_spike', 'consecutive_losses'): return False
+        return True
 
     def dump(self):
         return {'state': asdict(self.state), 'triggered': self.triggered, 'day': self.day,
-                'day_start_equity': self.day_start_equity, 'errors': list(self.errors)}
+                'day_start_equity': self.day_start_equity, 'errors': list(self.errors),
+                'entry_blocks': self.entry_blocks, 'handled_loss_streak': self.handled_loss_streak}
 
     def restore(self, data):
         self.state = KillState(**data['state'])
@@ -96,3 +112,5 @@ class KillSwitch:
         self.day = data['day']
         self.day_start_equity = data.get('day_start_equity')
         self.errors = deque(data.get('errors', []))
+        self.entry_blocks = data.get('entry_blocks', {})
+        self.handled_loss_streak = data.get('handled_loss_streak', 0)

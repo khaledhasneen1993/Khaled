@@ -22,7 +22,8 @@ from test_continuous import StreamData
 
 @pytest.fixture
 def live(tmp_path, monkeypatch):
-    cfg = load_config()
+    from legacy_config import legacy_execution_config
+    cfg = legacy_execution_config()
     cfg['exchange']['mode'] = 'testnet'
     cfg['exchange']['state_dir'] = str(tmp_path)
     monkeypatch.setenv('BINANCE_API_KEY', 'unit-test-key')
@@ -391,7 +392,8 @@ def test_expected_already_isolated_error_is_not_an_api_incident(live):
 
 
 def test_malformed_credentials_never_reach_http_headers(monkeypatch):
-    cfg = load_config()
+    from legacy_config import legacy_execution_config
+    cfg = legacy_execution_config()
     cfg['exchange']['mode'] = 'testnet'
     monkeypatch.setenv('BINANCE_API_KEY', 'unit-test-key\ninvalid')
     monkeypatch.setenv('BINANCE_API_SECRET', 'unit-test-secret')
