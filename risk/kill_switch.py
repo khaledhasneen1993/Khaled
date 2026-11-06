@@ -105,9 +105,6 @@ class KillSwitch:
     def entry_block_reason_raw(self):
         return next((reason for reason, until in self.entry_blocks.items() if until > time.time()), None)
 
-    def check_health(self):
-        return time.time() - self.state.last_ws_heartbeat <= self.cfg['ws_timeout_sec'] and len(self.errors) < self.cfg['api_error_limit']
-
     def _check(self, state, market):
         self._prune()
         equity = float(state.equity)

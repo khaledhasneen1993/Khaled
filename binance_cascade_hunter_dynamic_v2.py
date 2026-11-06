@@ -1,6 +1,6 @@
 # language: Python 3.11+, file: binance_cascade_hunter_dynamic_v2.py
-# target: Binance USDT-M Futures — V2 entries, adaptive TP/SL, paper execution
-# deps: pip install ccxt pandas numpy aiohttp
+# target: Binance USDT-M Futures — shared entry/exit strategy; run_demo.py selects Demo
+# dependencies: requirements.txt
 
 import asyncio
 import pandas as pd

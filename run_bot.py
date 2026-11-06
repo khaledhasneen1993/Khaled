@@ -2,7 +2,6 @@
 import argparse
 import asyncio
 import logging
-import signal
 from pathlib import Path
 
 from binance_cascade_hunter_dynamic_v2_paper import V2PaperHunter

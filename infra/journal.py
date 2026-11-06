@@ -31,9 +31,6 @@ class OperationalJournal:
         self.failed = False
         return True
 
-    def last_n(self, n):
-        return []  # Trade analytics are read from the persisted account ledger.
-
 
 def atomic_json(path, value):
     path = Path(path)

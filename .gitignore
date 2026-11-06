@@ -14,3 +14,6 @@ journal/*.log
 .runtime/
 .venv-dashboard/
 .dashboard.env
+
+# The template is public; actual connection settings stay local.
+!.env.example

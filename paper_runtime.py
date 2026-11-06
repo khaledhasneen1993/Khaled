@@ -1,4 +1,4 @@
-"""Continuous paper runtime for Khaled with adaptive exits."""
+"""Shared Paper/Demo runtime with durable execution and current exit policy."""
 
 import asyncio
 import copy

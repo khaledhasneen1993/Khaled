@@ -1,4 +1,4 @@
-"""Continuous candle monitoring; entry remains in the paper-only account."""
+"""Continuous candle monitoring for the selected Paper/Demo execution mode."""
 
 import asyncio
 import math

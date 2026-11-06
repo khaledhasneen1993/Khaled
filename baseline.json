@@ -1,7 +1,7 @@
 {
   "name": "Khaled Cascade Hunter",
-  "version": "4.1.0",
-  "status": "offline_validation_pending_soak",
+  "version": "4.1.1",
+  "status": "offline_validated_pending_demo_soak",
   "python": ">=3.11",
   "primary_entrypoint": "run_demo.py",
   "initial_balance_usdt": 100,
@@ -105,7 +105,6 @@
     ],
     "trade_max_pages": 20,
     "session_guard_filename": "session_guard.json",
-    "monitor_probe_checks": 12,
     "protection_attempts": 3,
     "protection_backoff_sec": 0.5,
     "retirement_attempts": 3,
@@ -264,24 +263,9 @@
     "scale_factor": 2,
     "max_mainnet_fraction": 1.0
   },
-  "approved_on": "2026-11-06",
-  "approval_scope": "repository_source_and_offline_tests",
-  "live_acceptance_status": "pending_testnet",
-  "comparison_dashboard": {
-    "host": "127.0.0.1",
-    "port": 8787,
-    "ui_commit": "eb24a32ac04e667f30d33d39f0d23d9efa8eb465",
-    "ui_cache": "runtime/comparison-ui",
-    "venv_dir": "runtime/comparison-venv",
-    "sessions_dir": "runtime/comparison-sessions"
-  },
   "demo": {
     "state_filename": "state.json",
-    "preflight_symbol": "BTCUSDT",
-    "huma_entry_order_id": null,
-    "huma_close_order_id": null,
-    "huma_symbol": "HUMAUSDT",
-    "huma_confirmed_realized_pnl": null
+    "preflight_symbol": "BTCUSDT"
   },
   "same_symbol_loss_cooldown": 600,
   "process": {

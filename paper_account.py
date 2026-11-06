@@ -1,7 +1,6 @@
 """Virtual account and persistent state for the Khaled paper simulation."""
 
 import asyncio
-import json
 import math
 from uuid import uuid4
 from datetime import datetime, timezone

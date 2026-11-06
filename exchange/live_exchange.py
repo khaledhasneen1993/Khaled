@@ -26,7 +26,7 @@ from infra.http_logging import secure_http_logging
 from infra.rate_limit import TokenBucket, with_backoff
 from journal.wal import WriteAheadLog, load_durable
 from infra.circuit_breaker import CircuitBreaker
-from .orders import ExchangeError, ExecutionUnknown, safe_create_order
+from .orders import ExchangeError, ExecutionUnknown
 from .execution import DurableExecution
 from .management import ProtectionRecovery
 from .protection_state import NativeExitState, ProtectionGuardError

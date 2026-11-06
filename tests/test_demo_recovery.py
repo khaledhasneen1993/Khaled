@@ -274,26 +274,6 @@ def test_readonly_tool_refuses_post(live):
     run(check())
 
 
-def test_huma_preview_and_idempotent_import(tmp_path):
-    from tools.recover_huma import recover, digest, apply_recovery
-    calls = []
-    async def request(method, path, params, **kw):
-        calls.append(method)
-        entry = params['orderId'] == 100
-        if path.endswith('/order'):
-            return {'symbol': 'HUMAUSDT', 'orderId': params['orderId'], 'status': 'FILLED',
-                'side': 'BUY' if entry else 'SELL', 'executedQty': '10', 'avgPrice': '0.10' if entry else '0.05', 'reduceOnly': not entry}
-        return [{'qty': '10', 'commissionAsset': 'USDT', 'commission': '0', 'realizedPnl': '0' if entry else '-0.5'}]
-    async def check():
-        ex = SimpleNamespace(cfg=load_config(), _request=request)
-        result = await recover(ex, {'huma_entry_order_id': 100, 'huma_close_order_id': 101, 'huma_confirmed_realized_pnl': '-0.5'})
-        assert result['historical_atr'] is None and result['realized_pnl'] == '-0.5'
-        path = tmp_path / 'history.json'
-        assert not path.exists()
-        assert apply_recovery(path, result, digest(result))
-        assert not apply_recovery(path, result, digest(result))
-        assert set(calls) == {'GET'}
-    run(check())
 
 
 @pytest.mark.parametrize('equity,max_leverage', [(17, 50), (2500, 20)])

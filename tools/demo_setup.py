@@ -1,4 +1,4 @@
-"""Record local operator checks after rotating the Demo key; never sends requests."""
+"""Record local operator checks for the Demo key; never sends requests."""
 import sys
 from pathlib import Path
 from datetime import datetime, timezone
@@ -18,8 +18,8 @@ def main():
         'ip_whitelist_verified': 'Available IP controls reviewed and configured for this device?',
     }
     print('This is operator attestation, not proof from apiRestrictions. No secrets are requested.')
-    if input('Old exposed Demo key revoked and replacement created? Type yes: ').strip() != 'yes':
-        raise ValueError('Rotate the exposed Demo key before setup')
+    if input('New Demo key created/rotated and any previously exposed key revoked? Type yes: ').strip() != 'yes':
+        raise ValueError('Review the Demo key before setup')
     data = {'mode': 'testnet'}
     for key, prompt in checks.items():
         if input(prompt + ' Type yes: ').strip() != 'yes': raise ValueError('Operator checks incomplete')
