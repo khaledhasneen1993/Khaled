@@ -35,6 +35,7 @@ class FuturesSimulator:
         self.lose_entry_response = self.lose_close_response = False
         self.delay_accounting = False
         self.reject_role = None
+        self.advertise_regular_stop = self.regular_stops = False
         self.partial_close = False
 
     def brackets(self, symbol):
@@ -128,7 +129,7 @@ class FuturesSimulator:
         if path.endswith('/time'): data = dict(serverTime=int(time.time() * 1000))
         elif path.endswith('/exchangeInfo'):
             data = {'symbols': [dict(symbol=s, baseAsset=s[:-4], quoteAsset='USDT', marginAsset='USDT',
-                contractType='PERPETUAL', status='TRADING', filters=[
+                contractType='PERPETUAL', status='TRADING', orderTypes=['MARKET', 'LIMIT'] + (['STOP_MARKET'] if self.advertise_regular_stop else []), filters=[
                     dict(filterType='LOT_SIZE', minQty=v[1], maxQty='10000000', stepSize=v[1]),
                     dict(filterType='MARKET_LOT_SIZE', minQty=v[1], maxQty='10000000', stepSize='0'),
                     dict(filterType='PRICE_FILTER', minPrice=v[2], maxPrice='10000000', tickSize=v[2]),
@@ -163,6 +164,14 @@ class FuturesSimulator:
             data = dict(lastFundingRate='0', nextFundingTime=int((time.time() + 3600) * 1000))
         elif path == '/fapi/v1/order':
             if method == 'POST':
+                if p.get('type') == 'STOP_MARKET':
+                    if not self.regular_stops: return httpx.Response(400, json={'code': -4120})
+                    oid = len(self.orders) + 1000
+                    data = dict(orderId=oid, clientOrderId=p['newClientOrderId'], symbol=s, side=p['side'],
+                        status='NEW', type='STOP_MARKET', origQty=p['quantity'], executedQty='0', avgPrice='0',
+                        stopPrice=p['stopPrice'], reduceOnly=True, workingType=p['workingType'])
+                    self.orders[oid] = data
+                    return httpx.Response(200, json=data)
                 data = self.fill(p)
                 lose = self.lose_close_response if data['reduceOnly'] else self.lose_entry_response
                 if lose:
@@ -170,7 +179,8 @@ class FuturesSimulator:
                     else: self.lose_entry_response = False
                     raise httpx.ReadTimeout('simulated lost POST response', request=request)
             elif method == 'DELETE':
-                data = self.orders.get(int(p['orderId']))
+                data = self.orders.get(int(p['orderId'])) if 'orderId' in p else next(
+                    (o for o in self.orders.values() if o['clientOrderId'] == p['origClientOrderId'] and o['symbol'] == s), None)
                 if data and data['status'] not in ('FILLED', 'CANCELED', 'EXPIRED', 'REJECTED'):
                     data['status'] = 'CANCELED'
             else:
@@ -181,7 +191,7 @@ class FuturesSimulator:
                 and ('orderId' not in p or str(f['orderId']) == p['orderId'])
                 and ('startTime' not in p or f['time'] >= int(p['startTime']))
                 and ('fromId' not in p or f['id'] >= int(p['fromId']))][:int(p.get('limit', 1000))]
-        elif path.endswith('/openOrders'): data = []
+        elif path.endswith('/openOrders'): data = [o for o in self.orders.values() if o['status'] in ('NEW', 'PARTIALLY_FILLED') and (not s or o['symbol'] == s)]
         elif path.endswith('/openAlgoOrders'):
             data = [o for o in self.algos.values() if o['algoStatus'] == 'NEW' and (not s or o['symbol'] == s)]
         elif path.endswith('/algoOrder'):

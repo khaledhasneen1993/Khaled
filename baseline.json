@@ -1,6 +1,6 @@
 {
   "name": "Khaled Cascade Hunter",
-  "version": "4.0.1",
+  "version": "4.0.2",
   "status": "approved_source_baseline",
   "python": ">=3.11",
   "primary_entrypoint": "run_demo.py",
@@ -105,7 +105,30 @@
     ],
     "trade_max_pages": 20,
     "session_guard_filename": "session_guard.json",
-    "monitor_probe_checks": 12
+    "monitor_probe_checks": 12,
+    "protection_attempts": 3,
+    "protection_backoff_sec": 0.5,
+    "retirement_attempts": 3,
+    "retirement_backoff_sec": 0.5,
+    "symbol_close_attempts": 3,
+    "symbol_close_backoff_sec": 0.5,
+    "regular_stop_fallback": true,
+    "regular_stop_unsupported_codes": [
+      -4120,
+      -1116
+    ],
+    "protection_rejection_codes": [
+      -2021,
+      -4120,
+      -1116,
+      -1106,
+      -1111,
+      -4003,
+      -4005
+    ],
+    "management_recovery_interval_sec": 5,
+    "management_entry_cooldown_sec": 600,
+    "management_filename": "management_faults.json"
   },
   "kill_switch": {
     "daily_dd_limit_pct": 0.05,

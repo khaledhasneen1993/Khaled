@@ -36,6 +36,9 @@ async def reconcile(exchange, state, journal):
             journal.log('position_mismatch', symbol=symbol)
     owned = {o['clientOrderId'] for pos in local.values() for o in pos.get('protection', {}).values()}
     owned |= {o['clientOrderId'] for o in state.open_orders.values()}
+    for symbol, fault in getattr(exchange, 'management_faults', {}).items():
+        if fault.get('status') != 'resolved' and fault.get('position'):
+            owned |= {ref['clientOrderId'] for _, ref in exchange.protection_references(symbol, fault['position'])}
     remote_orders = await exchange.get_open_orders()
     remote_ids = {o['clientOrderId'] for o in remote_orders}
     for symbol, pos in list(local.items()):

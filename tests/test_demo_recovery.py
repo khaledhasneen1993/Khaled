@@ -166,7 +166,7 @@ def test_pending_ambiguity_prevents_second_post(live):
 
 
 @pytest.mark.parametrize('failure_kind', ['STOP_MARKET', 'TAKE_PROFIT_MARKET'])
-def test_sl_or_tp_failure_latches_and_flattens(live, tmp_path, failure_kind):
+def test_sl_or_tp_failure_closes_affected_symbol(live, tmp_path, failure_kind):
     def handler(server):
         async def send(request):
             if request.url.path == '/fapi/v1/algoOrder' and request.method == 'POST' and request.url.params['type'] == failure_kind:
@@ -176,7 +176,8 @@ def test_sl_or_tp_failure_latches_and_flattens(live, tmp_path, failure_kind):
     async def check():
         bot, server = await prepare(live, tmp_path, handler)
         assert not await bot.enter(SYMBOL, 'buy', 100)
-        assert not server.qty and bot.safety.kill.triggered
+        assert not server.qty and not bot.safety.kill.triggered
+        assert live.management_faults[SYMBOL]['reason'] == 'entry_confirmed_management_failed'
         assert len(live.trades) == 2 and live.trades[-1]['emergency']
         await live.close()
     run(check())
@@ -472,7 +473,7 @@ def test_nonterminal_partial_is_confirmed_cancelled_before_residual_close(live, 
         bot, server = await prepare(live, tmp_path, handler)
         with patch('exchange.execution.asyncio.sleep', new_callable=AsyncMock):
             assert not await bot.enter(SYMBOL, 'buy', 100)
-        assert not server.qty and bot.safety.kill.triggered
+        assert not server.qty and bot.safety.kill.triggered == 'order_execution_uncertain'
         assert partial_order['status'] == 'CANCELED'
         assert sum(t['amount'] for t in live.trades if t['reduceOnly']) == .5
         assert len(server.orders) == 2

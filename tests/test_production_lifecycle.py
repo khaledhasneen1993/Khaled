@@ -70,7 +70,8 @@ def test_production_wiring_fault_matrix(tmp_path, monkeypatch, fault):
         with patch('asyncio.sleep', new_callable=AsyncMock):
             entered = await bot.enter(symbol, 'buy', .05)
             if fault in ('sl_reject'):
-                assert not entered and bot.safety.kill.triggered
+                assert not entered and not bot.safety.kill.triggered
+                assert bot.exchange.management_faults[symbol]['reason'] == 'entry_confirmed_management_failed'
                 assert not server.position_rows()
             else:
                 assert entered and bot.positions[symbol]['protection']

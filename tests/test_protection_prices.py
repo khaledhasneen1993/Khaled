@@ -312,14 +312,15 @@ def test_native_price_pending_restart_keeps_origin_and_no_duplicate_exit(tmp_pat
             return response
         await live.client.aclose()
         live.client = httpx.AsyncClient(base_url=bot.cfg['exchange']['base_url_testnet'], transport=httpx.MockTransport(handler))
-        with patch('asyncio.sleep', new_callable=AsyncMock): assert not await bot.safety.reconcile_once()
+        with patch('asyncio.sleep', new_callable=AsyncMock): assert await bot.safety.reconcile_once()
         assert not server.position_rows() and len(server.orders) == 2
         assert not any(t.get('exit_detail') for t in live.trades)
         await live.close()
         bot = await production_bot(tmp_path, monkeypatch, server, startup=False)
         assert await bot.exchange.recover_execution()
-        assert await bot.adopt_native_close(symbol)
-        assert len(server.orders) == 2 and bot.safety.kill.triggered
+        bot.exchange.management_faults[symbol]['last_attempt']-=10
+        assert await bot.safety.reconcile_once()
+        assert len(server.orders) == 2 and not bot.safety.kill.triggered
         result = next(t['exit_detail'] for t in bot.exchange.trades if t.get('exit_detail'))
         assert result['exit_reason'] == 'HARD_SL'
         assert D(result['net_pnl_exact']) == server.wallet - server.start_wallet

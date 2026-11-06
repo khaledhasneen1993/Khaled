@@ -31,6 +31,10 @@ def reviewed_reset_state(data, root, cfg):
     if any(r.get('native_exit') and (r['order'].get('status') not in terminal
             or float(r['order'].get('executedQty', 0)) > 0 and not r.get('trade')) for r in executions.values()):
         raise ValueError('Unresolved native exit remains; reconcile before reset')
+    management_path = root / cfg['exchange']['management_filename']
+    management = json.loads(management_path.read_text()) if management_path.exists() else {}
+    if any(f.get('status') != 'resolved' for f in management.values()):
+        raise ValueError('Pending symbol management remains; recover it before reset')
     kill = KillSwitch(cfg['kill_switch'])
     kill.restore(data['operations']['kill'])
     kill.roll_day(data.get('equity_usdt'))

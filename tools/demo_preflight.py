@@ -63,6 +63,7 @@ async def preflight(exchange, symbol, websocket=True):
     pending_native = sum(bool(r.get('native_exit')) and (r['order'].get('status') not in TERMINAL_ORDER_STATUSES
         or bool(r.get('fill_price_pending')) or float(r['order'].get('executedQty', 0)) > 0 and not r.get('trade'))
         for r in exchange.executions.values())
+    pending_management = [symbol for symbol, fault in exchange.management_faults.items() if fault.get('status') != 'resolved']
     unresolved = []
     for client_id, intent in exchange.intents.items():
         if intent['status'] == 'rejected': continue
@@ -82,9 +83,11 @@ async def preflight(exchange, symbol, websocket=True):
         'local_pending_intents': sum(i['status'] == 'pending' for i in exchange.intents.values()),
         'pending_execution_prices': pending_prices,
         'pending_native_exits': pending_native,
+        'pending_symbol_management': pending_management,
+        'symbol_entry_cooldowns': {symbol: fault['entry_block_until'] for symbol, fault in exchange.management_faults.items() if fault.get('entry_block_until')},
         'entry_blocks': operations.get('kill', {}).get('entry_blocks', {}),
         'same_symbol_loss_cooldowns': operations.get('loss_cooldowns', {}),
-        'requires_operator_review': bool(not policy_matches or exchange.positions or orders or kill or guard.get('active') or storage_failed or unresolved or pending_accounting or pending_prices or pending_native
+        'requires_operator_review': bool(pending_management or not policy_matches or exchange.positions or orders or kill or guard.get('active') or storage_failed or unresolved or pending_accounting or pending_prices or pending_native
                                          or not choice.get('entry_order_valid', False) or can_trade is not True or websocket and not ws_ok)}
 
 

@@ -26,11 +26,12 @@ from infra.http_logging import secure_http_logging
 from infra.rate_limit import TokenBucket, with_backoff
 from .orders import ExchangeError, ExecutionUnknown, safe_create_order
 from .execution import DurableExecution
+from .management import ProtectionRecovery
 from .protection_state import NativeExitState, ProtectionGuardError
 from .quantity import quantity_rules, validate_quantity, OrderValidationError
 
 
-class LiveExchange(DurableExecution, NativeExitState, PaperExchange):
+class LiveExchange(DurableExecution, NativeExitState, ProtectionRecovery, PaperExchange):
     def __init__(self, cfg: dict, rate_limiter):
         self.cfg = cfg
         self.mode = cfg['exchange']['mode']
@@ -95,6 +96,8 @@ class LiveExchange(DurableExecution, NativeExitState, PaperExchange):
         self.executions = json.loads(self.execution_path.read_text()) if self.execution_path.exists() else {}
         protection_path = self.intent_path.parent / 'protection.json'
         if protection_path.exists(): self.pending_protection = json.loads(protection_path.read_text())
+        self.management_path = self.intent_path.parent / ec['management_filename']
+        self.management_faults = json.loads(self.management_path.read_text()) if self.management_path.exists() else {}
         self.execution_fault = None
         self.emergency_mode = False
         self.storage_fault = False
@@ -132,7 +135,7 @@ class LiveExchange(DurableExecution, NativeExitState, PaperExchange):
         self.intents[client_id] = {'symbol': params['symbol'], 'type': params['type'],
             'side': params['side'], 'amount': params['amount'],
             'params': {k: v for k, v in params['params'].items() if k in
-                       ('reduceOnly', 'expected_price', 'exit_atr', 'atr_source', 'stopPrice', 'round_up', 'newClientOrderId', 'signal_id', 'leverage', 'risk_cfg', 'equity', 'brackets', 'exit_reason', 'exit_position', 'protection_role', 'replaces')},
+                       ('reduceOnly', 'expected_price', 'exit_atr', 'atr_source', 'stopPrice', 'round_up', 'newClientOrderId', 'signal_id', 'leverage', 'risk_cfg', 'equity', 'brackets', 'exit_reason', 'exit_position', 'protection_role', 'replaces', 'protection_transport', 'emergency')},
             'status': 'pending'}
         self.write_state(self.intent_path, self.intents)
         logged = self.journal.log('order_intent_saved', stage='before_post', symbol=params['symbol'], client_order_id=client_id, recovery_action='query_same_id')
@@ -143,7 +146,7 @@ class LiveExchange(DurableExecution, NativeExitState, PaperExchange):
 
     def resolve_intent(self, client_id, result):
         intent = self.intents[client_id]
-        algo = intent['type'] in ('STOP_MARKET', 'TAKE_PROFIT_MARKET')
+        algo = intent['type'] in ('STOP_MARKET', 'TAKE_PROFIT_MARKET') and intent.get('params', {}).get('protection_transport') != 'regular'
         identity, client_key = ('algoId', 'clientAlgoId') if algo else ('orderId', 'clientOrderId')
         if (not isinstance(result, dict) or not str(result.get(identity, '')).isdigit()
                 or int(result[identity]) <= 0 or result.get(client_key) != client_id):
@@ -153,7 +156,7 @@ class LiveExchange(DurableExecution, NativeExitState, PaperExchange):
         keys = ('orderId', 'clientOrderId', 'algoId', 'clientAlgoId', 'symbol', 'side',
                 'status', 'algoStatus', 'type', 'orderType', 'origQty', 'executedQty',
                 'cumQuote', 'avgPrice', 'reduceOnly', 'quantity', 'triggerPrice',
-                'actualOrderId', 'workingType', 'time', 'updateTime', 'createTime')
+                'actualOrderId', 'workingType', 'stopPrice', 'time', 'updateTime', 'createTime')
         def snapshot(value): return {k: value[k] for k in keys if k in value}
         observations = intent.setdefault('observations', [])
         if not observations and intent.get('response'):
@@ -221,7 +224,10 @@ class LiveExchange(DurableExecution, NativeExitState, PaperExchange):
                     await self.sync_time()
                     return await once()
                 expected_limit = path == '/fapi/v1/leverage' and code in self.cfg['exchange']['leverage_rejection_codes']
-                if self.on_api_error and not expected_limit and code not in self.cfg['exchange']['non_incident_error_codes']:
+                local_protection_rejection = (method == 'POST' and path in ('/fapi/v1/algoOrder', '/fapi/v1/order')
+                    and (params or {}).get('type') in ('STOP_MARKET', 'TAKE_PROFIT_MARKET')
+                    and response.status_code == 400 and code in self.cfg['exchange']['protection_rejection_codes'])
+                if self.on_api_error and not expected_limit and not local_protection_rejection and code not in self.cfg['exchange']['non_incident_error_codes']:
                     self.on_api_error()
                 try: after = float(response.headers.get('Retry-After', 0))
                 except ValueError: after = self.cfg['exchange']['max_backoff_sec']
@@ -250,7 +256,7 @@ class LiveExchange(DurableExecution, NativeExitState, PaperExchange):
             filters = {f['filterType']: f for f in raw['filters']}
             bounds = quantity_rules(filters)
             self.markets[symbol] = {'id': raw['symbol'], 'symbol': symbol, 'linear': True, 'swap': True,
-                'settle': raw['marginAsset'], 'active': raw['status'] == 'TRADING', 'filters': filters,
+                'settle': raw['marginAsset'], 'order_types': raw.get('orderTypes', []), 'active': raw['status'] == 'TRADING', 'filters': filters,
                 'step': str(bounds['step']), 'tick': filters['PRICE_FILTER']['tickSize'],
                 'limits': {'amount': {'min': float(bounds['min']), 'max': float(bounds['max'])},
                            'cost': {'min': float(filters.get('MIN_NOTIONAL', {}).get('notional', 0))}}}
@@ -414,7 +420,8 @@ class LiveExchange(DurableExecution, NativeExitState, PaperExchange):
 
     async def query_order_by_client_id(self, symbol, client_id):
         try:
-            if self.intents.get(client_id, {}).get('type') in ('STOP_MARKET', 'TAKE_PROFIT_MARKET'):
+            if (self.intents.get(client_id, {}).get('type') in ('STOP_MARKET', 'TAKE_PROFIT_MARKET')
+                    and self.intents[client_id].get('params', {}).get('protection_transport') != 'regular'):
                 return await self._request('GET', '/fapi/v1/algoOrder', {'clientAlgoId': client_id}, retry=True)
             return await self._request('GET', '/fapi/v1/order', {'symbol': self.raw(symbol), 'origClientOrderId': client_id}, retry=True)
         except ExchangeError as error:
@@ -426,6 +433,11 @@ class LiveExchange(DurableExecution, NativeExitState, PaperExchange):
         client_id = options['newClientOrderId']
         quantity = self.amount_to_precision(symbol, amount)
         validate_quantity(self.market(symbol), quantity)
+        if type in ('STOP_MARKET', 'TAKE_PROFIT_MARKET') and options.get('protection_transport') == 'regular':
+            return await self._request('POST', '/fapi/v1/order', {'symbol': self.raw(symbol), 'side': side.upper(),
+                'type': type, 'quantity': quantity, 'reduceOnly': 'true', 'newClientOrderId': client_id,
+                'stopPrice': self._price(symbol, options['stopPrice'], options['round_up']),
+                'workingType': self.cfg['exchange']['working_type']})
         if type in ('STOP_MARKET', 'TAKE_PROFIT_MARKET'):
             values = {'algoType': 'CONDITIONAL', 'symbol': self.raw(symbol), 'side': side.upper(), 'type': type,
                 'quantity': quantity, 'reduceOnly': 'true', 'clientAlgoId': client_id,
@@ -438,31 +450,15 @@ class LiveExchange(DurableExecution, NativeExitState, PaperExchange):
             **({'reduceOnly': 'true'} if options.get('reduceOnly') else {})})
 
     async def protect(self, symbol, pos):
-        """Create-confirm-before-cancel: no unsupported atomic STOP amendment."""
-        side = 'sell' if pos['side'] == 'buy' else 'buy'
-        for name, kind, target in (('sl', 'STOP_MARKET', pos['sl']), ('tp', 'TAKE_PROFIT_MARKET', pos['tp'])):
-            if target is None: continue
-            self.execution_stage = 'protection_' + name
-            old = pos.get('protection', {}).get(name)
-            # Stop rounds toward entry; TP rounds away, preserving planned RR.
-            round_up = pos['side'] == 'buy'
-            if name == 'sl' and old:
-                sm = 1 if pos['side'] == 'buy' else -1
-                if sm * (target - float(old['trigger'])) < 0:
-                    target = pos['sl'] = float(old['trigger'])
-            trigger = self._price(symbol, target, round_up)
-            if old and old['trigger'] == trigger and old.get('amount') == pos['amount']: continue
-            result = await safe_create_order(self, {'symbol': symbol, 'type': kind, 'side': side,
-                'amount': pos['amount'], 'params': {'reduceOnly': True, 'stopPrice': float(trigger), 'round_up': round_up,
-                'signal_id': pos['signal_id'], 'protection_role': name, 'replaces': copy.deepcopy(old)}}, self.journal)
-            client_id = result['clientAlgoId']
-            confirmed = await self.query_order_by_client_id(symbol, client_id)
-            self.verify_protection(symbol, pos, name, confirmed, client_id, result['algoId'], trigger)
-            await self.commit_protection(symbol, pos, name, confirmed, trigger, old)
+        await self.protect_with_recovery(symbol, pos)
 
-    def verify_protection(self, symbol, pos, name, confirmed, client_id, order_id, trigger):
+    def verify_protection(self, symbol, pos, name, confirmed, client_id, order_id, trigger, transport="algo"):
         kind = 'STOP_MARKET' if name == 'sl' else 'TAKE_PROFIT_MARKET'
         side = 'SELL' if pos['side'] == 'buy' else 'BUY'
+        if transport == 'regular':
+            confirmed = ({**confirmed, 'algoStatus': confirmed.get('status'), 'clientAlgoId': confirmed.get('clientOrderId'),
+                'algoId': confirmed.get('orderId'), 'orderType': confirmed.get('type'),
+                'quantity': confirmed.get('origQty'), 'triggerPrice': confirmed.get('stopPrice')} if confirmed else None)
         if (not confirmed or confirmed.get('algoStatus') != 'NEW'
                 or confirmed.get('clientAlgoId') != client_id
                 or str(confirmed.get('algoId')) != str(order_id)
@@ -470,13 +466,14 @@ class LiveExchange(DurableExecution, NativeExitState, PaperExchange):
                 or confirmed.get('side') != side or confirmed.get('orderType') != kind
                 or confirmed.get('reduceOnly') not in (True, 'true')
                 or Decimal(str(confirmed.get('quantity', 0))) != Decimal(self.amount_to_precision(symbol, pos['amount']))
+                or confirmed.get('workingType', self.cfg['exchange']['working_type']) != self.cfg['exchange']['working_type']
                 or Decimal(str(confirmed.get('triggerPrice', 0))) != Decimal(trigger)):
             raise ExecutionUnknown()
 
-    async def commit_protection(self, symbol, pos, name, confirmed, trigger, old):
-        client_id = confirmed['clientAlgoId']
-        pos.setdefault('protection', {})[name] = {'orderId': confirmed['algoId'],
-            'clientOrderId': client_id, 'trigger': trigger, 'is_algo': True, 'amount': pos['amount']}
+    async def commit_protection(self, symbol, pos, name, confirmed, trigger, old, transport="algo"):
+        client_id = confirmed['clientAlgoId'] if transport == 'algo' else confirmed['clientOrderId']
+        pos.setdefault('protection', {})[name] = {'orderId': confirmed['algoId'] if transport == 'algo' else confirmed['orderId'],
+            'clientOrderId': client_id, 'trigger': trigger, 'is_algo': transport == 'algo', 'amount': pos['amount']}
         self.pending_protection[symbol] = pos
         self.write_state(self.intent_path.parent / 'protection.json', self.pending_protection)
         for record in self.executions.values():
@@ -487,9 +484,17 @@ class LiveExchange(DurableExecution, NativeExitState, PaperExchange):
         self.write_state(self.intent_path, self.intents)
         # Every durable replacement reference is committed before DELETE.
         if old and old['clientOrderId'] != client_id:
-            try: await self.cancel_algo(old)
-            except ExchangeError as error:
-                if error.code not in (-2011, -2013): raise
+            try:
+                await self.cancel_protection(symbol, old)
+                previous = await self.query_protection(symbol, old)
+                if previous and previous.get('algoStatus', previous.get('status')) in ('NEW', 'TRIGGERING', 'PARTIALLY_FILLED'):
+                    raise ExecutionUnknown()
+            except ExchangeError:
+                fault = self.management_fault(symbol, 'superseded_protection_cleanup_pending', pos)
+                obsolete = fault.setdefault('obsolete', [])
+                if not any(ref['clientOrderId'] == old['clientOrderId'] for _, ref in obsolete):
+                    obsolete.append((name, copy.deepcopy(old)))
+                self.write_state(self.management_path, self.management_faults)
 
     async def recover_protection_intents(self):
         unresolved = False
@@ -507,11 +512,12 @@ class LiveExchange(DurableExecution, NativeExitState, PaperExchange):
                 continue
             confirmed = await self.query_order_by_client_id(symbol, client_id)
             if not confirmed:
+                if self.management_blocked(symbol): continue
                 unresolved = True
                 continue
             self.resolve_intent(client_id, confirmed)
             active = any(float(p['positionAmt']) != 0 for p in await self.get_position(symbol))
-            if not active or confirmed.get('algoStatus') in ('FINISHED', 'CANCELED', 'EXPIRED', 'REJECTED'):
+            if not active or confirmed.get('algoStatus', confirmed.get('status')) in ('FINISHED', 'FILLED', 'CANCELED', 'EXPIRED', 'REJECTED'):
                 # Native fills and flat-account orphan cleanup are reconciled by
                 # their actual child order/remaining position, never a new POST.
                 intent['protection_committed'] = True
@@ -522,14 +528,14 @@ class LiveExchange(DurableExecution, NativeExitState, PaperExchange):
                 continue
             name = options.get('protection_role') or ('sl' if intent['type'] == 'STOP_MARKET' else 'tp')
             trigger = self._price(symbol, options['stopPrice'], options['round_up'])
-            self.verify_protection(symbol, pos, name, confirmed, client_id, confirmed['algoId'], trigger)
+            self.verify_protection(symbol, pos, name, confirmed, client_id, confirmed.get('algoId', confirmed.get('orderId')), trigger, options.get('protection_transport', 'algo'))
             old = options.get('replaces') or pos.get('protection', {}).get(name)
             if name == 'sl' and old:
                 sm = 1 if pos['side'] == 'buy' else -1
                 if sm * (float(trigger) - float(old['trigger'])) < 0:
                     unresolved = True
                     continue
-            await self.commit_protection(symbol, pos, name, confirmed, trigger, old)
+            await self.commit_protection(symbol, pos, name, confirmed, trigger, old, options.get('protection_transport', 'algo'))
         return not unresolved
 
     def validate_initial_protection(self, symbol, pos):

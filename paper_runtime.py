@@ -107,6 +107,11 @@ class DynamicPaperHunter(dynamic.CascadeHunter, PaperState):
                 if pending_symbol not in self.positions:
                     self.positions[pending_symbol] = pending
             await self.safety.trip(self.exchange.execution_fault)
+        elif self.execution_mode != 'paper' and self.exchange.management_faults.get(symbol, {}).get('close_pending'):
+            for pending_symbol, pending in self.exchange.pending_protection.items():
+                self.positions.setdefault(pending_symbol, pending)
+            await self.safety.handle_symbol_failure(symbol, 'entry_confirmed_management_failed')
+            result = False
         elif self.safety.kill.triggered and self.safety.active:
             await self.safety.trip(self.safety.kill.triggered)
             result = False
@@ -294,16 +299,17 @@ class DynamicPaperHunter(dynamic.CascadeHunter, PaperState):
                     self.exchange.execution_fault = previous_fault
                     return
             raise
+        retired = True
         if symbol in self.positions:
             if self.execution_mode != 'paper':
-                await self.exchange.retire_protection(symbol, self.positions[symbol])
+                retired = await self.exchange.retire_protection(symbol, self.positions[symbol])
             self.record_exit_reason(symbol, reason, price)
             self.positions.pop(symbol, None)
-        if self.execution_mode != "paper":
+        if self.execution_mode != 'paper' and not retired:
+            await self.safety.event('symbol_cleanup_pending', 'warning', symbol=symbol,
+                stage='native_protection_retirement', recovery_action='block_symbol_and_retry_cleanup')
+        if self.execution_mode != "paper" and retired:
             self.exchange.clear_active_protection(symbol)
-            for order in await self.exchange.get_open_orders(symbol):
-                if order.get("is_algo"): await self.exchange.cancel_algo(order)
-                else: await self.exchange.cancel_order(symbol, order_id=order["orderId"])
         if self.execution_mode != 'paper': self.finalize_closed_trades()
         self.persist_execution_metadata()
         await self._drain_notifications()
@@ -412,14 +418,12 @@ class DynamicPaperHunter(dynamic.CascadeHunter, PaperState):
                        and t.get('signal_id') == pos['signal_id'])
         if not math.isclose(quantity, original_quantity, rel_tol=self.cfg['exchange']['fill_qty_tolerance_pct']):
             return False
-        await self.exchange.retire_protection(symbol, pos)
+        retired = await self.exchange.retire_protection(symbol, pos)
         self.record_exit_reason(symbol, reason, closes[-1]['price'])
         self.persist_execution_metadata()
         self.positions.pop(symbol)
-        self.exchange.clear_active_protection(symbol, pos['signal_id'])
-        for remaining in await self.exchange.get_open_orders(symbol):
-            if remaining.get('is_algo'): await self.exchange.cancel_algo(remaining)
-            else: await self.exchange.cancel_order(symbol, order_id=remaining['orderId'])
+        if retired:
+            self.exchange.clear_active_protection(symbol, pos['signal_id'])
         await self._drain_notifications()
         self.save()
         return True
@@ -451,8 +455,8 @@ class DynamicPaperHunter(dynamic.CascadeHunter, PaperState):
                     from infra.errors import diagnostic_fields
                     await self.safety.event('protection_update_exception', 'critical', symbol=symbol,
                         stage=getattr(self.exchange, 'execution_stage', 'protection_update'),
-                        recovery_action='latch_and_close_remaining', **diagnostic_fields(error))
-                    await self.safety.trip("protection_update_failed")
+                        recovery_action='close_affected_symbol_only', **diagnostic_fields(error))
+                    await self.safety.handle_symbol_failure(symbol, 'protection_update_failed', error)
         await self._drain_notifications()
         self.save()
 

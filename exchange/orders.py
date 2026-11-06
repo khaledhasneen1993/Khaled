@@ -31,7 +31,9 @@ async def safe_create_order(exchange, order_params, journal):
         if intent['symbol'] == params['symbol'] and intent['type'] == params['type'] and intent['status'] == 'pending':
             raise ExecutionUnknown()
     options = dict(params.get('params') or {})
-    attempts = exchange.cfg['exchange']['order_attempts']
+    # ProtectionRecovery owns the bounded conditional retry budget. Each
+    # definitive rejection here returns to that loop; market retry rules stay.
+    attempts = 1 if params['type'] in ('STOP_MARKET', 'TAKE_PROFIT_MARKET') else exchange.cfg['exchange']['order_attempts']
     for attempt in range(attempts):
         client_id = exchange.cfg['exchange']['client_id_prefix'] + uuid.uuid4().hex
         options['newClientOrderId'] = client_id

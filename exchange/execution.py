@@ -6,6 +6,7 @@ execution ledger is keyed by Binance order ID, not a locally generated trade ID.
 import asyncio
 import copy
 import math
+import time
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 
@@ -239,7 +240,7 @@ class DurableExecution:
             'reduceOnly': reducing, 'fee_usdt': 0., 'pnl_usdt': 0., 'accounting_status': 'pending',
             'balance_usdt': self.balance, 'mode': self.mode, 'recovered': recovered,
             'protection_status': 'unconfirmed' if not reducing else 'closed',
-            'emergency': bool(self.execution_fault or record.get('emergency')), 'signal_id': options.get('signal_id') if reducing else order['clientOrderId']}
+            'emergency': bool(options.get('emergency') or self.execution_fault or record.get('emergency')), 'signal_id': options.get('signal_id') if reducing else order['clientOrderId']}
         # A later cumulative fill invalidates provisional/previous accounting.
         if trade['amount'] != filled:
             trade.update(amount=filled, price=actual, fee_usdt=0., pnl_usdt=0., accounting_status='pending')
@@ -368,6 +369,25 @@ class DurableExecution:
         return {**record['trade'], 'average': actual, 'filled': filled, 'status': 'closed',
                 **({'risk_position': pos} if pos else {})}
 
+    async def recover_fill(self, symbol, order, options, side, **kwargs):
+        """Apply the same confirmed-entry scope during restart recovery."""
+        try:
+            return await self._accept_fill(symbol, order, options, side, **kwargs)
+        except FillPriceUnavailable:
+            raise
+        except Exception as error:
+            record = self.executions.get(self.execution_key(symbol, order['orderId']), {})
+            if (not options.get('reduceOnly') and record.get('trade') and record['order'].get('status') in TERMINAL
+                    and not self.storage_fault and not self.journal.failed):
+                self.management_fault(symbol, 'entry_confirmed_management_failed', record.get('position'),
+                    close_pending=True, flat_confirmed=False, stage=self.execution_stage,
+                    entry_block_until=time.time() + self.cfg['exchange']['management_entry_cooldown_sec'],
+                    order_id=order['orderId'])
+                self.journal.log('entry_management_recovery_pending', symbol=symbol, stage=self.execution_stage,
+                    order_id=order['orderId'], error_type=type_name(error), recovery_action='close_affected_symbol_only')
+                return None
+            raise
+
     async def recover_execution(self):
         """Called under runtime lock before reconciliation, on startup and periodically."""
         unresolved = False
@@ -384,19 +404,20 @@ class DurableExecution:
                         if record.get('risk_error'):
                             unresolved |= live
                         elif live and not self.emergency_mode:
-                            await self._accept_fill(intent['symbol'], record['order'], options, intent['side'], recovered=True)
+                            await self.recover_fill(intent['symbol'], record['order'], options, intent['side'], recovered=True)
                 continue
             order = await self.query_order_by_client_id(intent['symbol'], client_id)
             if not order:
+                if options.get('reduceOnly') and self.management_closed(intent['symbol']): continue
                 unresolved = True
                 continue
             self.resolve_intent(client_id, order)
             order = self._remember_order(intent['symbol'], order, options, intent['side'])['order']
             if float(order.get('executedQty', 0)) > 0:
                 try:
-                    await self._accept_fill(intent['symbol'], order, options, intent['side'], recovered=True, facts_only=self.emergency_mode)
+                    await self.recover_fill(intent['symbol'], order, options, intent['side'], recovered=True, facts_only=self.emergency_mode)
                 except FillPriceUnavailable:
-                    unresolved = True
+                    if not (options.get('reduceOnly') and self.management_closed(intent['symbol'])): unresolved = True
             if order.get('status') not in TERMINAL: unresolved = True
         if not await self.recover_native_exits(): unresolved = True
         await self.sync_accounting()
@@ -431,10 +452,12 @@ class DurableExecution:
     async def create_order(self, symbol, type, side, amount, params=None):
         self.execution_stage = 'before_post_validation'
         previous_ids = set(self.intents)
+        previous_fault = self.execution_fault
         try:
             return await self._create_order(symbol, type, side, amount, params)
         except Exception as error:
             current_ids = set(self.intents) - previous_ids
+            symbol_scoped = False
             reducing = bool((params or {}).get('reduceOnly'))
             if isinstance(error, OrderValidationError) and not current_ids and not reducing:
                 self.journal.log('entry_validation_blocked', symbol=symbol, stage='before_post',
@@ -467,16 +490,25 @@ class DurableExecution:
                 elif self.execution_fault == 'order_execution_uncertain' and affected['order'].get('status') in TERMINAL:
                     self.execution_fault = 'close_confirmed_reconciliation_failed'
                 self._upsert_trade(affected['trade'])
+            if (affected and not affected['trade']['reduceOnly'] and affected['order'].get('status') in TERMINAL
+                    and not self.storage_fault and not self.journal.failed):
+                symbol_scoped = True
+                self.management_fault(symbol, 'entry_confirmed_management_failed', affected.get('position'),
+                    close_pending=True, flat_confirmed=False, stage=self.execution_stage,
+                    entry_block_until=time.time() + self.cfg['exchange']['management_entry_cooldown_sec'],
+                    order_id=affected['order']['orderId'])
+                self.execution_fault = previous_fault
             latest = next((i for i in reversed(list(self.intents.values())) if i['symbol'] == symbol), {})
             self.journal.log('order_execution_failed', symbol=symbol, stage=self.execution_stage,
                 order_id=latest.get('order_id'), client_order_id=latest.get('params', {}).get('newClientOrderId'),
                 error_type=type_name(error), http_status=getattr(error, 'status', 0),
                 exchange_error_code=getattr(error, 'code', 0),
-                recovery_action='review_definitive_rejection' if isinstance(error, OrderRejected) else 'reconcile_before_resend')
+                recovery_action='close_affected_symbol_only' if symbol_scoped else 'review_definitive_rejection' if isinstance(error, OrderRejected) else 'reconcile_before_resend')
             raise
 
     async def _create_order(self, symbol, type, side, amount, params=None):
         options = copy.deepcopy(params or {})
+        if self.emergency_mode: options['emergency'] = True
         if options.get('reduceOnly'):
             await self.settle_before_close(symbol)
         # Resolve previous same-symbol ambiguity before considering another send.

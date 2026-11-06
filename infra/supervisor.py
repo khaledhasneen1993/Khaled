@@ -84,6 +84,9 @@ class SafetySupervisor:
     async def allow_entry(self, symbol, side, price):
         if not self.ready or self.kill.triggered or self.storage_failed or self.journal.failed:
             return False
+        if self.live and self.bot.exchange.management_blocked(symbol):
+            await self.event('entry_blocked', 'warning', symbol=symbol, reason='symbol_management_pending')
+            return False
         market = self.latest.get(symbol)
         if reason := self.kill.check(self.bot.exchange, market):
             await self.trip(reason)
@@ -245,10 +248,111 @@ class SafetySupervisor:
             await self.event('kill_flatten_incomplete', 'critical', reason=self.kill.triggered)
         self.save_safely()
 
+    async def adopt_closed_symbol(self, symbol):
+        """Caller has just proven flatness; attribution can remain pending."""
+        try:
+            return await self.bot.adopt_native_close(symbol)
+        except Exception as error:
+            if self.bot.exchange.storage_fault or self.storage_failed or self.bot.exchange.journal.failed: raise
+            await self.event('symbol_accounting_pending', 'warning', symbol=symbol,
+                stage=getattr(self.bot.exchange, 'execution_stage', 'closed_symbol_recovery'),
+                recovery_action='retain_closed_symbol_metadata', **diagnostic_fields(error))
+            return False
+
+    async def handle_symbol_failure(self, symbol, reason, error=None):
+        """Close a known affected symbol; escalate only an unsafe/unclosed state."""
+        exchange = self.bot.exchange
+        if exchange.storage_fault or self.storage_failed or exchange.journal.failed:
+            await self.trip('storage_failure')
+            return False
+        pos = self.bot.positions.get(symbol) or exchange.pending_protection.get(symbol)
+        if pos is None:
+            pos = next((r.get('position') or r.get('entry_facts') for r in reversed(list(exchange.executions.values()))
+                        if r['symbol'] == symbol and not r.get('trade', {}).get('reduceOnly')), None)
+        exchange.management_fault(symbol, reason, pos, close_pending=True,
+                                  stage=getattr(exchange, 'execution_stage', 'symbol_management'))
+        await self.event('symbol_management_failed', 'critical', symbol=symbol, reason=reason,
+            stage=getattr(exchange, 'execution_stage', 'symbol_management'),
+            recovery_action='close_affected_symbol_only', **(diagnostic_fields(error) if error else {}))
+        previous_fault = exchange.execution_fault
+        previous_emergency = exchange.emergency_mode
+        exchange.emergency_mode = True
+        try:
+            for attempt in range(self.cfg['exchange']['symbol_close_attempts']):
+                try:
+                    await exchange.refresh_account()
+                    if symbol in exchange.positions:
+                        if pos: self.bot.positions.setdefault(symbol, pos)
+                        await self.bot.close_position(symbol, 'protection_failure')
+                    else:
+                        if symbol in self.bot.positions:
+                            if not await self.adopt_closed_symbol(symbol):
+                                exchange.management_fault(symbol, 'closed_symbol_accounting_pending', pos,
+                                    close_pending=False, retirement_pending=True, accounting_pending=True,
+                                    flat_confirmed=True)
+                                self.bot.positions.pop(symbol, None)
+                        if pos and exchange.management_faults.get(symbol, {}).get('retirement_pending'):
+                            await exchange.retire_protection(symbol, pos)
+                    await exchange.refresh_account()
+                    if symbol not in exchange.positions:
+                        if not exchange.management_faults[symbol].get('retirement_pending'):
+                            exchange.resolve_management_fault(symbol)
+                        else:
+                            exchange.management_faults[symbol]['close_pending'] = False
+                            exchange.write_state(exchange.management_path, exchange.management_faults)
+                        if not exchange.storage_fault: exchange.execution_fault = previous_fault
+                        self.save_safely()
+                        return True
+                except Exception as caught:
+                    await self.event('symbol_close_pending', 'critical', symbol=symbol, attempt=attempt + 1,
+                        stage=getattr(exchange, 'execution_stage', 'symbol_close'),
+                        recovery_action='query_previous_close_and_actual_remaining', **diagnostic_fields(caught))
+                if attempt + 1 < self.cfg['exchange']['symbol_close_attempts']:
+                    await asyncio.sleep(self.cfg['exchange']['symbol_close_backoff_sec'] * (attempt + 1))
+            # Account-wide policy is explicit and only reached if bounded,
+            # reducing symbol recovery could not establish a safe closure.
+            await self.trip('symbol_emergency_close_failed')
+            return False
+        finally:
+            exchange.emergency_mode = previous_emergency
+
+    async def recover_symbol_management(self):
+        exchange = self.bot.exchange
+        for symbol, fault in list(exchange.management_faults.items()):
+            if fault.get('status') == 'resolved': continue
+            if fault.get('close_pending'):
+                if not await self.handle_symbol_failure(symbol, fault['reason']): return False
+            elif fault.get('retirement_pending') or fault.get('accounting_pending'):
+                if time.time() - fault.get('last_attempt', 0) < self.cfg['exchange']['management_recovery_interval_sec']:
+                    continue
+                pos = fault.get('position')
+                if not pos: continue
+                previous_fault = exchange.execution_fault
+                if fault.get('accounting_pending'):
+                    await exchange.refresh_account()
+                    if symbol in exchange.positions:
+                        if not await self.handle_symbol_failure(symbol, 'symbol_position_reappeared'): return False
+                        continue
+                    self.bot.positions.setdefault(symbol, pos)
+                    adopted = await self.adopt_closed_symbol(symbol)
+                    fault = exchange.management_faults[symbol]
+                    if adopted:
+                        fault['accounting_pending'] = False
+                    else:
+                        self.bot.positions.pop(symbol, None)
+                    if not exchange.storage_fault: exchange.execution_fault = previous_fault
+                if await exchange.retire_protection(symbol, pos):
+                    exchange.clear_active_protection(symbol, pos.get('signal_id'))
+                exchange.write_state(exchange.management_path, exchange.management_faults)
+        return True
+
     async def reconcile_once(self):
         from exchange.reconciler import reconcile
         if self.live:
-            if not await self.bot.exchange.recover_execution():
+            if not await self.recover_symbol_management(): return False
+            recovery_ok = await self.bot.exchange.recover_execution()
+            if not await self.recover_symbol_management(): return False
+            if not recovery_ok and not await self.bot.exchange.recover_execution():
                 await self.trip('pending_order_review')
                 return False
             await self.bot.exchange.refresh_account()
@@ -269,9 +373,12 @@ class SafetySupervisor:
                 await self.event('protection_recovery_exception', 'critical',
                     stage=getattr(self.bot.exchange, 'execution_stage', 'native_exit_resolution'),
                     report=error.details if isinstance(error, ProtectionGuardError) else None,
-                    recovery_action='latch_and_close_remaining', **diagnostic_fields(error))
-                await self.trip('protection_recovery_failed')
-                return False
+                    recovery_action='account_emergency' if isinstance(error, ProtectionGuardError) and error.reason == 'mark_liquidation_buffer_breach' else 'close_affected_symbol_only', **diagnostic_fields(error))
+                if isinstance(error, ProtectionGuardError) and error.reason == 'mark_liquidation_buffer_breach':
+                    await self.trip('protection_recovery_failed')
+                    return False
+                if not await self.handle_symbol_failure(symbol, 'protection_recovery_failed', error): return False
+                return await self.reconcile_once()
             # Check identity and size before replacing any native protection.
             local, remote = self.bot.positions, self.bot.exchange.positions
             mismatch = set(local) != set(remote) or any(
@@ -299,9 +406,12 @@ class SafetySupervisor:
                 await self.event('protection_recovery_exception', 'critical',
                     stage=getattr(self.bot.exchange, 'execution_stage', 'protection_recovery'),
                     report=error.details if isinstance(error, ProtectionGuardError) else None,
-                    recovery_action='latch_and_close_remaining', **diagnostic_fields(error))
-                await self.trip('protection_recovery_failed')
-                return False
+                    recovery_action='account_emergency' if isinstance(error, ProtectionGuardError) and error.reason == 'mark_liquidation_buffer_breach' else 'close_affected_symbol_only', **diagnostic_fields(error))
+                if isinstance(error, ProtectionGuardError) and error.reason == 'mark_liquidation_buffer_breach':
+                    await self.trip('protection_recovery_failed')
+                    return False
+                if not await self.handle_symbol_failure(symbol, 'protection_recovery_failed', error): return False
+                return await self.reconcile_once()
         report = await reconcile(self.bot.exchange, self.bot, self.journal)
         if any(report.values()):
             if self.evidence:
@@ -380,6 +490,8 @@ class SafetySupervisor:
                     stage = 'execution_fault_handling'
                     if getattr(self.bot.exchange, 'execution_fault', None):
                         await self.trip(self.bot.exchange.execution_fault)
+                    if self.live:
+                        await self.recover_symbol_management()
                     stage = 'spread_check'
                     if self.live and now - self.last_spread >= self.cfg['kill_switch']['spread_poll_sec']:
                         for symbol in list(self.bot.positions):

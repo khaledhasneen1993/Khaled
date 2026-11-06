@@ -28,6 +28,13 @@ def live(tmp_path, monkeypatch):
     cfg['exchange']['state_dir'] = str(tmp_path)
     monkeypatch.setenv('BINANCE_API_KEY', 'unit-test-key')
     monkeypatch.setenv('BINANCE_API_SECRET', 'unit-test-secret')
+    original_client = httpx.AsyncClient
+    def unmocked(request):
+        raise AssertionError('Unexpected HTTP request in offline fixture: ' + request.method + ' ' + request.url.path)
+    def client(*args, **kwargs):
+        kwargs.setdefault('transport', httpx.MockTransport(unmocked))
+        return original_client(*args, **kwargs)
+    monkeypatch.setattr(httpx, 'AsyncClient', client)
     exchange = LiveExchange(cfg, SimpleNamespace(acquire=AsyncMock()))
     for name in ('weights', 'orders_short', 'orders_long'):
         setattr(exchange, name, SimpleNamespace(acquire=AsyncMock()))
@@ -106,6 +113,7 @@ def test_protection_replacement_confirms_new_before_cancel(live):
         return accepted[client_id]
     async def cancel(order): events.append(('cancel', order['orderId']))
     live.submit_order, live.query_order_by_client_id, live.cancel_algo = submit, query, cancel
+    live.query_protection = AsyncMock(return_value={'algoStatus': 'CANCELED'})
     async def check():
         await live.protect('BTC/USDT:USDT', pos)
         assert [e[0] for e in events[:3]] == ['post', 'confirmed', 'cancel']
@@ -330,14 +338,15 @@ def test_partial_close_aggregate_accounting_and_residual_flatten(live, tmp_path)
     run(check())
 
 
-def test_failed_initial_protection_flattens_real_fill(live, tmp_path):
+def test_failed_initial_protection_closes_only_real_fill(live, tmp_path):
     async def check():
         bot, server = await runtime_with_transport(live, tmp_path)
         server.reject_protection = True
         with patch('exchange.orders.asyncio.sleep', new_callable=AsyncMock):
             assert not await bot.enter('BTC/USDT:USDT', 'buy', 100)
         assert not server.qty  # possible real entry was not mistaken for a no-op
-        assert bot.safety.kill.triggered == 'protection_rejected'
+        assert bot.safety.kill.triggered is None
+        assert live.management_faults['BTC/USDT:USDT']['reason'] == 'entry_confirmed_management_failed'
         assert any(t['side'] == 'buy' for t in live.trades)
         assert any(t['reduceOnly'] for t in live.trades)
         assert live.trades[-1]['exit_detail']['net_pnl_usdt'] == pytest.approx(server.wallet - 100)

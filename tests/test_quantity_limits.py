@@ -80,7 +80,8 @@ def test_filter_failure_after_filled_entry_still_flattens(live, tmp_path):
         live.protect = AsyncMock(side_effect=OrderValidationError('quantity_above_max'))
         assert not await bot.enter(S, 'buy', 100)
         assert not server.qty and len(server.orders) == 2
-        assert bot.safety.kill.triggered == 'protection_validation_failed'
+        assert bot.safety.kill.triggered is None
+        assert live.management_faults[S]['reason'] == 'entry_confirmed_management_failed'
         await live.close()
     run(check())
 
