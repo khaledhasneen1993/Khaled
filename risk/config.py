@@ -1,5 +1,6 @@
 """Baseline settings and scoped runner selection; no on-disk mode swapping."""
 import json
+import math
 from pathlib import Path
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -10,6 +11,12 @@ _mode = ContextVar('execution_mode', default=None)
 def load_config():
     root = Path(__file__).resolve().parents[1]
     cfg = json.loads((root / 'baseline.json').read_text())
+    paper_notional = cfg.get('paper_position_notional_usdt')
+    if paper_notional is not None and (
+        type(paper_notional) not in (int, float)
+        or not math.isfinite(paper_notional) or paper_notional <= 0
+    ):
+        raise ValueError('Paper position notional must be a finite positive amount')
     if cfg['exit'].get('policy') == 'hard_stop_trailing':
         if (cfg['leverage'] != cfg['exposure']['leverage']
                 or cfg['max_concurrent_positions'] != cfg['exposure']['max_concurrent']):

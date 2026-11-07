@@ -6,6 +6,12 @@ def fixed_exits(cfg):
     return cfg['exit'].get('policy') == 'hard_stop_trailing'
 
 
+def fixed_paper_notional(cfg):
+    if cfg['exchange']['mode'] == 'paper' and fixed_exits(cfg):
+        return cfg.get('paper_position_notional_usdt')
+    return None
+
+
 def entry_amount(equity, price, leverage, cfg, fee_rate, round_amount=lambda q: q):
     if not all(math.isfinite(v) and v > 0 for v in (equity, price, leverage)):
         raise ValueError('Invalid sizing inputs')

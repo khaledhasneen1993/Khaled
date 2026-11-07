@@ -40,7 +40,7 @@ class Position(dict):
 
 
 def make_position(side, entry, amount, leverage, atr, cfg, equity, fee_rate,
-                  opened_at=None, signal_id=None, atr_source="candles"):
+                  opened_at=None, signal_id=None, atr_source="candles", *, enforce_equity_risk=True):
     sm = 1 if side == "buy" else -1
     from risk.trading_policy import fixed_exits
     if fixed_exits(cfg):
@@ -48,7 +48,7 @@ def make_position(side, entry, amount, leverage, atr, cfg, equity, fee_rate,
         pct = cfg['exit']['hard_stop_pct']
         stop = entry * (1 - sm * pct)
         loss = amount * (entry * pct + fee_rate * (entry + stop))
-        if loss > equity * cfg['tp_sl']['max_equity_risk_pct'] + math.ulp(equity) * 8:
+        if enforce_equity_risk and loss > equity * cfg['tp_sl']['max_equity_risk_pct'] + math.ulp(equity) * 8:
             raise ValueError('Hard stop exceeds equity risk budget')
         if not validate_stop_against_liq(side, entry, stop, leverage, cfg['tp_sl']['mmr'],
                 cfg['tp_sl']['liq_safety_margin'], cfg['tp_sl'].get('maintenance_amount', 0), amount):
@@ -148,6 +148,14 @@ class PaperExchange:
         if not closing and position:
             raise ValueError("Position already exists")
         price = float((await self.fetch_ticker(symbol))["last"])
+        target_notional = None
+        if not closing and (params or {}).get("use_paper_notional"):
+            from risk.trading_policy import fixed_paper_notional
+            target_notional = fixed_paper_notional(self.cfg)
+            if target_notional is not None:
+                amount = float(self.amount_to_precision(symbol, target_notional / price))
+                if not math.isfinite(amount) or amount <= 0:
+                    raise ValueError("Fixed Paper notional is below market quantity precision")
         notional = amount * price
         fee = notional * self.fee_rate
         pnl = 0.0
@@ -172,7 +180,8 @@ class PaperExchange:
             atr = (params or {}).get("exit_atr", price * self.cfg["atr"]["fallback_atr_pct"])
             risk_position = make_position(side, price, amount, self.leverage, atr,
                                           self.cfg, self.equity, self.fee_rate,
-                                          atr_source=(params or {}).get("atr_source", "fallback"))
+                                          atr_source=(params or {}).get("atr_source", "fallback"),
+                                          enforce_equity_risk=target_notional is None)
             self.balance -= fee
             self.positions[symbol] = {
                 "side": side, "entry": price, "amount": amount, "margin": margin,
@@ -240,7 +249,13 @@ class PaperState:
         # Pre-feature states have no exit-config snapshot. Existing settings
         # must still match, while positions are upgraded on their next check.
         saved_settings.setdefault("active_exit", self.settings()["active_exit"])
-        if (state["version"] != 1 or saved_settings != self.settings()
+        current_settings = self.settings()
+        # This size applies to new entries only. Existing positions retain their fills.
+        if current_settings.get("execution_mode") == "paper":
+            saved_settings.pop("paper_position_notional_usdt", None)
+            if "paper_position_notional_usdt" in current_settings:
+                saved_settings["paper_position_notional_usdt"] = current_settings["paper_position_notional_usdt"]
+        if (state["version"] != 1 or saved_settings != current_settings
                 or state["fee_rate"] != self.exchange.fee_rate):
             raise ValueError("State settings differ; use a new --state path or --reset")
         wallet = float(state["balance_usdt"])

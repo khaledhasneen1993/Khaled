@@ -5,6 +5,7 @@
   "python": ">=3.11",
   "primary_entrypoint": "run_demo.py",
   "initial_balance_usdt": 100,
+  "paper_position_notional_usdt": 100,
   "position_basis": "current_equity",
   "leverage": 10,
   "margin_fraction_per_position": 0.1,

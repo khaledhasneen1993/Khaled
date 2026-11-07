@@ -203,6 +203,7 @@ def test_equity_current_used(tmp_path):
     async def check():
         data = StreamData()
         bot = V2PaperHunter(tmp_path / 'state.json', fee_rate=0, market_data=data)
+        bot.cfg.pop('paper_position_notional_usdt')
         first = await bot.size_position('BTC/USDT:USDT')
         bot.exchange.balance = 80
         second = await bot.size_position('BTC/USDT:USDT')

@@ -135,7 +135,10 @@ class CascadeHunter:
         if getattr(self, 'execution_mode', 'paper') != 'paper':
             choice = await self.exchange.select_leverage(symbol, usdt * self.cfg['margin_fraction_per_position'], price)
             return choice['amount'] if choice.get('entry_order_valid', True) else 0.0
-        from risk.trading_policy import entry_amount
+        from risk.trading_policy import entry_amount, fixed_paper_notional
+        notional = fixed_paper_notional(self.cfg)
+        if notional is not None:
+            return float(self.exchange.amount_to_precision(symbol, notional / price))
         return entry_amount(usdt, price, self.cfg['leverage'], self.cfg, self.exchange.fee_rate,
                             lambda q: float(self.exchange.amount_to_precision(symbol, q)))
 
@@ -158,7 +161,7 @@ class CascadeHunter:
             return False
 
         try:
-            from risk.trading_policy import expected_slippage_bps
+            from risk.trading_policy import expected_slippage_bps, fixed_paper_notional
             if self.cfg['exit'].get('policy') == 'hard_stop_trailing':
                 book = await self.exchange.fetch_order_book(symbol, limit=self.cfg['kill_switch']['book_depth'])
                 expected_bps = expected_slippage_bps(book, side, amount, price)
@@ -171,10 +174,11 @@ class CascadeHunter:
             else:
                 atr, atr_source = await self.exit_atr(symbol, price)
             await self.set_leverage(symbol)
-            fill = await self.exchange.create_order(
-                symbol, "market", side, amount,
-                params={"reduceOnly": False, "exit_atr": atr, "atr_source": atr_source, "expected_price": price}
-            )
+            params = {"reduceOnly": False, "exit_atr": atr,
+                      "atr_source": atr_source, "expected_price": price}
+            if fixed_paper_notional(self.cfg) is not None:
+                params["use_paper_notional"] = True
+            fill = await self.exchange.create_order(symbol, "market", side, amount, params=params)
             self.last_trade[symbol] = now
             self.positions[symbol] = fill["risk_position"]
             log.info(f"ENTER {side.upper()} {symbol} size={amount:.4f} @ {price:.4f}")

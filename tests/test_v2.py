@@ -2,7 +2,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 import asyncio
 import binance_cascade_hunter_dynamic_v2 as v2
 from binance_cascade_hunter_dynamic_v2_paper import V2PaperHunter
@@ -19,12 +19,12 @@ class V2Tests(unittest.IsolatedAsyncioTestCase):
         self.data.tickers['DOGE/USDT:USDT'] = {'quoteVolume': 25_000_000}
         self.bot = V2PaperHunter(self.path, fee_rate=0, market_data=self.data)
 
-    async def test_risk_budget_limits_margin_and_allows_four_positions(self):
+    async def test_fixed_notional_allows_four_positions(self):
         for symbol in ('BTC/USDT:USDT','ETH/USDT:USDT','SOL/USDT:USDT','DOGE/USDT:USDT'):
             self.assertTrue(await self.bot.enter(symbol, 'buy', 100))
             pos = self.bot.positions[symbol]
-            self.assertLessEqual(pos['amount'] * 8, 2.5)
-            self.assertLess(self.bot.exchange.positions[symbol]['margin'], 10)
+            self.assertEqual(pos['amount'] * pos['entry'], 100)
+            self.assertEqual(self.bot.exchange.positions[symbol]['margin'], 10)
         self.assertFalse(await self.bot.enter('FIFTH/USDT:USDT','buy',100))
         self.assertEqual(len(self.bot.positions), 4)
 
@@ -63,9 +63,11 @@ class V2Tests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.path.read_bytes(),before)
 
     async def test_saved_policy_restores_positions_and_settings(self):
+        self.bot.cfg.pop('paper_position_notional_usdt')
         await self.bot.enter('SOL/USDT:USDT','buy',100)
         restored=V2PaperHunter(self.path,fee_rate=0,market_data=self.data)
         self.assertEqual(restored.positions,self.bot.positions)
+        self.assertEqual(restored.settings()['paper_position_notional_usdt'], 100)
         self.assertEqual(json.loads(self.path.read_text())['settings']['MAX_CONCURRENT_POSITIONS'],4)
 
     async def test_continuous_scanner_opens_four_on_updates(self):
@@ -80,8 +82,18 @@ class V2Tests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.bot.positions),4)
         self.assertEqual(len(self.bot.exchange.trades),4)
 
+    async def test_fixed_notional_uses_execution_price(self):
+        symbol = 'BTC/USDT:USDT'
+        self.data.fetch_ticker = AsyncMock(side_effect=[{'last': 100}, {'last': 100.1}])
+        self.assertTrue(await self.bot.enter(symbol, 'buy', 100))
+        fill = self.bot.exchange.trades[0]
+        self.assertEqual(fill['amount'], .999)
+        self.assertAlmostEqual(fill['amount'] * fill['price'], 99.9999)
+        self.assertAlmostEqual(self.bot.positions[symbol]['sl'], 100.1 * .92)
+
     async def test_sizing_uses_current_equity_and_fee_budget(self):
         bot=V2PaperHunter(self.path,market_data=self.data)
+        bot.cfg.pop('paper_position_notional_usdt')
         await bot.enter('BTC/USDT:USDT','buy',100)
         opening=bot.exchange.trades[0]
         self.assertAlmostEqual(bot.exchange.balance,100-opening['fee_usdt'])

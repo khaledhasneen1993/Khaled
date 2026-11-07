@@ -85,7 +85,7 @@ def test_levels_anchor_to_fill_not_signal(tmp_path):
         pos = bot.positions['BTC/USDT:USDT']
         assert pos['entry'] == bot.exchange.positions['BTC/USDT:USDT']['entry'] == 100.2
         assert pos['sl'] == pytest.approx(100.2 * .92) and pos['tp'] is None
-        assert abs(pos['sl'] - 100.2) * pos['amount'] + pos['entry_fee'] + pos['sl'] * pos['amount'] * bot.exchange.fee_rate <= 3 + 1e-9
+        assert pos['amount'] * pos['entry'] == pytest.approx(100, abs=.101)
     asyncio.run(check())
 
 
@@ -108,6 +108,7 @@ def test_legacy_state_upgrades_without_changing_account_or_size(tmp_path):
         data = StreamData()
         path = tmp_path / 'state.json'
         bot = V2PaperHunter(path, market_data=data)
+        bot.cfg.pop('paper_position_notional_usdt')
         assert await bot.enter('BTC/USDT:USDT', 'buy', 100)
         state = json.loads(path.read_text())
         state['settings'].pop('active_exit')
